@@ -97,6 +97,7 @@ typedef struct Server {
 	char       pending_focus[64];
 	char       caps_ls[1024];   /* IRCv3 capabilities offered by the server */
 	int        cap_sasl;        /* SASL was acknowledged */
+	int        sasl_ok;         /* logged in to the account via SASL */
 	int        away;
 	struct { char nick[32]; int count; uint64_t reset_at; int warned; } flood[16];
 	/* /LIST results */

@@ -263,6 +263,18 @@ char irc_my_prefix(Server *s, Chan *c)
 	return 0;
 }
 
+/* "Automatic" (AUTH_NONE) uses the password when there is one: SASL if the
+ * server offers it, NickServ IDENTIFY otherwise. */
+static int use_sasl(Server *s)
+{
+	return s->cfg.password[0] && (s->cfg.auth == AUTH_SASL || s->cfg.auth == AUTH_NONE);
+}
+
+static const char *account_name(Server *s)
+{
+	return s->cfg.user[0] ? s->cfg.user : s->cfg.nick;
+}
+
 /* Private-message flood protection: returns 1 when the message must be dropped. */
 static int pm_flooding(Server *s, const char *nick)
 {
@@ -833,6 +845,9 @@ static void handle_line(Server *s, char *raw)
 		char *end = strchr(text, '\x01');
 		if (end) *end = 0;
 		irc_add_msg(s, c, MT_NOTICE, l.nick ? l.nick : "", text, 0);
+		if (l.nick && !str_icmp(l.nick, "NickServ") && !s->cfg.password[0] &&
+		    (str_icontains(text, "is registered") || str_icontains(text, "identify via")))
+			ui_toast(T("Nick registrado: pon tu contraseña en Servidores para identificarte solo"));
 		return;
 	}
 
@@ -968,7 +983,7 @@ static void handle_line(Server *s, char *raw)
 			static const char *wanted[] = { "server-time", "znc.in/server-time-iso", "multi-prefix", "away-notify", "sasl" };
 			char req[200] = "";
 			for (unsigned i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
-				if (!strcmp(wanted[i], "sasl") && !(s->cfg.auth == AUTH_SASL && s->cfg.password[0]))
+				if (!strcmp(wanted[i], "sasl") && !use_sasl(s))
 					continue;
 				size_t wl = strlen(wanted[i]);
 				for (const char *q = s->caps_ls; (q = strstr(q, wanted[i])); q += wl) {
@@ -1051,12 +1066,24 @@ static void handle_line(Server *s, char *raw)
 		if (l.np >= 1)
 			str_copy(s->nick, l.p[0], sizeof(s->nick));
 		status_msg(s, MT_SERVER, T("Conectado a %s como %s"), s->cfg.host, s->nick);
-		if (s->cfg.auth == AUTH_NICKSERV && s->cfg.password[0]) {
-			const char *user = s->cfg.user[0] ? s->cfg.user : s->cfg.nick;
-			irc_send_raw(s, "PRIVMSG NickServ :IDENTIFY %s %s", user, s->cfg.password);
-			s->join_at = now_ms() + 2200;
-		} else {
-			s->join_at = now_ms() + 300;
+		{
+			int pw = s->cfg.password[0] != 0;
+			int identify = pw && !s->sasl_ok && s->cfg.auth != AUTH_PASS;
+			if (identify) {
+				irc_send_raw(s, "PRIVMSG NickServ :IDENTIFY %s %s", account_name(s), s->cfg.password);
+				s->join_at = now_ms() + 2200;
+			} else {
+				s->join_at = now_ms() + 300;
+			}
+			/* our nick was still taken (e.g. the previous session hasn't timed out
+			 * yet because the app was closed from the LiveArea): take it back */
+			if (pw && s->cfg.auth != AUTH_PASS && str_icmp(s->nick, s->cfg.nick)) {
+				if (s->sasl_ok)
+					irc_send_raw(s, "PRIVMSG NickServ :REGAIN %s", s->cfg.nick);
+				else
+					irc_send_raw(s, "PRIVMSG NickServ :REGAIN %s %s", s->cfg.nick, s->cfg.password);
+				status_msg(s, MT_INFO, T("Recuperando tu nick %s..."), s->cfg.nick);
+			}
 		}
 		ui_toast(T("%s: conectado"), s->cfg.name);
 		return;
@@ -1176,11 +1203,14 @@ static void handle_line(Server *s, char *raw)
 		irc_add_msg(s, reply_chan(s), MT_SERVER, NULL, T("Ahora estás marcado como ausente"), 0);
 		return;
 	case 903:
+		s->sasl_ok = 1;
 		status_msg(s, MT_SERVER, T("Autenticación SASL correcta"));
 		irc_send_raw(s, "CAP END");
 		return;
 	case 902: case 904: case 905: case 906: case 907:
 		status_msg(s, MT_ERROR, T("SASL falló: %s"), last);
+		if (num == 904)
+			status_msg(s, MT_ERROR, T("Revisa la cuenta y la contraseña en Servidores. Se intentará con NickServ."));
 		irc_send_raw(s, "CAP END");
 		return;
 	default:
@@ -1276,6 +1306,7 @@ static void *server_thread(void *arg)
 		const char *user = cfg.user[0] ? cfg.user : cfg.nick;
 		s->caps_ls[0] = 0;
 		s->cap_sasl = 0;
+		s->sasl_ok = 0;
 		irc_send_raw(s, "CAP LS 302");
 		if (cfg.auth == AUTH_PASS && cfg.password[0])
 			irc_send_raw(s, "PASS %s", cfg.password);

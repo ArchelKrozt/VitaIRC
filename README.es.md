@@ -25,7 +25,9 @@ a la escena de la Vita y es de código abierto.
 
 ## Funciones
 
-- Varios servidores a la vez, SSL/TLS y reconexión automática. NickServ, **SASL** y PASS de servidor.
+- Varios servidores a la vez, SSL/TLS y reconexión automática.
+- **Identificación automática** (SASL, NickServ o PASS de servidor): si pusiste contraseña, se identifica
+  sola y **recupera tu nick** si una sesión anterior lo dejó ocupado.
 - Canales, privados, lista de usuarios con prefijos y estado ausente.
 - IRCv3 (`server-time`, `multi-prefix`, `away-notify`), ideal para usar con bouncers.
 - **Colores, negritas y subrayado de IRC**, **palabras de alerta**, avisos y **sonido** en privados y menciones.
@@ -69,13 +71,18 @@ Escribe `/help` para ver todos los comandos (`/join`, `/msg`, `/away`, `/ignore`
 - **ChatGPT**: crea una API key en [platform.openai.com](https://platform.openai.com/api-keys) y ponla en △ → Ajustes.
 - **Imgur**: registra una app en [api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient)
   (*uso anónimo*) y copia el Client-ID en Ajustes.
-- **Cuenta de Libera.Chat**: en Servidores → Libera.Chat, completa Nick, Cuenta y Contraseña, y elige
-  autenticación **SASL PLAIN**.
+- **Cuenta de Libera.Chat**: en Servidores → Libera.Chat, completa Nick, Cuenta y Contraseña, con
+  autenticación **SASL PLAIN** o **Automática**. Al conectar verás "Autenticación SASL correcta".
 - **Bouncer (soju/ZNC)**: agrégalo como un servidor más. soju: SASL con cuenta `usuario/red@vita`;
   ZNC: PASS de servidor `usuario/red:contraseña`. Así no pierdes mensajes aunque la Vita esté apagada.
 
 Todo se guarda en `ux0:data/VitaIRC/` (`config.ini`, `logs/`, `photos/`...). Las claves y contraseñas
 se guardan en texto plano.
+
+## Actualizar
+
+Instala el VPK nuevo encima del anterior. Solo se reemplaza la app (`ux0:app/VIRC00001/`); tus
+servidores, canales, ajustes e historial en `ux0:data/VitaIRC/` se conservan.
 
 ## Limitaciones
 

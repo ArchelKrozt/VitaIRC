@@ -29,7 +29,7 @@ const char *auth_name(int auth)
 	case AUTH_NICKSERV: return "NickServ IDENTIFY";
 	case AUTH_SASL:     return "SASL PLAIN";
 	case AUTH_PASS:     return "Server PASS";
-	default:            return T("Ninguna");
+	default:            return T("Automática");
 	}
 }
 

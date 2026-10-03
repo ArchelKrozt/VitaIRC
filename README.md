@@ -41,6 +41,7 @@ something back to the Vita scene, and it is fully open source.
 - [Logging in to Libera.Chat (SASL)](#logging-in-to-liberachat-sasl)
 - [Never miss a message: bouncers](#never-miss-a-message-bouncers)
 - [Configuration file](#configuration-file)
+- [Updating](#updating)
 - [Where your data lives](#where-your-data-lives)
 - [Limitations](#limitations)
 - [Building from source](#building-from-source)
@@ -53,7 +54,8 @@ something back to the Vita scene, and it is fully open source.
 
 **IRC**
 - Several networks at once, SSL/TLS (mbedTLS) and automatic reconnection.
-- NickServ, **SASL PLAIN** and server-password authentication.
+- **Automatic login**: SASL PLAIN, NickServ or server password. With a password set, VitaIRC
+  identifies by itself and **takes your nick back** if a previous session is still holding it.
 - Channels, private messages, user lists with op/voice prefixes and away status.
 - IRCv3: `server-time`, `multi-prefix`, `away-notify`, perfect for bouncers.
 - **mIRC colors, bold and underline** rendered on screen (can be turned off).
@@ -104,7 +106,7 @@ something back to the Vita scene, and it is fully open source.
 2. Copy it to your Vita (VitaShell → FTP or USB).
 3. Install it with VitaShell and launch **VitaIRC** from the LiveArea.
 
-Updating is the same: install the new VPK on top; your settings and history are kept.
+Updating is the same: install the new VPK on top; see [Updating](#updating).
 
 ## Getting started
 
@@ -194,10 +196,14 @@ messages, links and commands are skipped, results are cached on the memory card,
 | Nick | your registered nick |
 | Account (username) | your Libera account name |
 | Password | your NickServ password |
-| Authentication | **SASL PLAIN** |
+| Authentication | **SASL PLAIN** (or **Automatic**) |
 
 Save, then reconnect (□ in the server list). The server window will say
-*"SASL authentication successful"*. No account yet? From the server window:
+*"SASL authentication successful"*.
+
+**Automatic** uses your password whenever one is set: SASL if the server supports it, NickServ
+IDENTIFY otherwise. If your nick is still taken by an old session (for example, you closed the app
+from the LiveArea and reopened it within a few minutes), VitaIRC asks NickServ to `REGAIN` it for you. No account yet? From the server window:
 `/msg NickServ REGISTER yourpassword you@example.com`.
 
 ## Never miss a message: bouncers
@@ -244,12 +250,17 @@ nick=MyNick
 user=myaccount
 realname=VitaIRC user
 password=
-auth=2                   ; 0 none, 1 NickServ, 2 SASL PLAIN, 3 server PASS
+auth=2                   ; 0 automatic, 1 NickServ, 2 SASL PLAIN, 3 server PASS
 channels=#vitasdk,#henkaku
 autoconnect=1
 ```
 
 Translation languages: `es en pt fr de it ja ru zh ko`.
+
+## Updating
+
+Install the new VPK on top of the old one. Only the app in `ux0:app/VIRC00001/` is replaced;
+your servers, channels, settings and history in `ux0:data/VitaIRC/` are kept.
 
 ## Where your data lives
 

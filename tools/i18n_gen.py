@@ -235,6 +235,10 @@ T = {
 "--- historial hasta %.2s/%.2s %s ---": "--- history until %.2s/%.2s %s ---",
 # config.c
 "Ninguna": "None",
+"Automática": "Automatic",
+"Recuperando tu nick %s...": "Getting your nick %s back...",
+"Revisa la cuenta y la contraseña en Servidores. Se intentará con NickServ.": "Check the account and password in Servers. Trying NickServ instead.",
+"Nick registrado: pon tu contraseña en Servidores para identificarte solo": "Registered nick: set your password in Servers to identify automatically",
 "Traducción...": "Translation...",
 "Imágenes (Imgur, cámara, enlaces)...": "Images (Imgur, camera, links)...",
 "Buscar en el canal...": "Search in channel...",

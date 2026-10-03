@@ -3,6 +3,8 @@
 ## 1.0 — first release
 
 - Native IRC client for PS Vita: multiple networks, SSL/TLS, NickServ / SASL PLAIN / server password.
+- Automatic login: uses your password via SASL (falling back to NickServ) and regains your nick
+  if an old session still holds it.
 - IRCv3 `server-time`, `multi-prefix` and `away-notify`; works great with soju and ZNC bouncers.
 - Persistent per-channel history and session restore.
 - ChatGPT translation of incoming and outgoing messages, per-channel language, persistent cache and usage counter.
