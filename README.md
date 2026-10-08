@@ -38,6 +38,7 @@ something back to the Vita scene, and it is fully open source.
 - [Commands](#commands)
 - [Translation](#translation)
 - [Images: uploads, camera and viewer](#images-uploads-camera-and-viewer)
+- [Image search and favorites](#image-search-and-favorites)
 - [Logging in to Libera.Chat (SASL)](#logging-in-to-liberachat-sasl)
 - [Never miss a message: bouncers](#never-miss-a-message-bouncers)
 - [Configuration file](#configuration-file)
@@ -95,6 +96,8 @@ something back to the Vita scene, and it is fully open source.
   camera** and upload it, all from the chat. Services: **Litterbox** (no account needed),
   **ImgBB**, **Imgur** or **your own soju bouncer** (`soju.im/FILEHOST`).
 - **My recent uploads**: resend a link, or delete an ImgBB image.
+- **Image search** on Safebooru, Danbooru and Sankaku with a thumbnail grid, **favorites** kept on
+  the memory card, **save to the Vita** and **send to the chat** in one button.
 - **Built-in image viewer** (PNG/JPG, zoom and pan) for image and Imgur links; other links open in
   the Vita browser.
 
@@ -207,6 +210,31 @@ Pick the service in **△ → Settings → Image service**:
 - **Viewer**: tap a message with an image link (or use **Channel links and images**). PNG and JPG
   open inside the app; GIFs and web pages open in the Vita browser.
 
+## Image search and favorites
+
+**△ → Images... → Search images**. Type English tags (`scenery`, `cat_ears sky`...).
+
+| Button | Action |
+|---|---|
+| D-pad / touch | Move in the grid (tap twice to open) |
+| L / R, swipe | Previous / next page (more results load by themselves) |
+| ✕ | Open the image |
+| □ | Add / remove favorite |
+| △ | New search |
+| SELECT | Change service: Safebooru → Danbooru → Sankaku |
+| START | Switch between **Results** and **Favorites** |
+
+In the image: **✕ Send to chat** (to the window that was open when you started the search),
+**□ Favorite**, **△ Save to the Vita** (`ux0:picture/VitaIRC/`, WebP becomes JPEG), SELECT opens the
+post in the browser.
+
+- **Safebooru / Danbooru** links never expire, so the original's link is sent directly.
+- **Sankaku** links expire within an hour, so VitaIRC downloads the image and re-uploads it with your
+  image service before sending. A Sankaku account (optional, Settings) gives more results.
+- Searches show **general content only** unless *Settings → Search: adult content* is turned on
+  (asks you to confirm you are 18+). Tags that sexualise minors are always filtered out.
+- Danbooru allows two tags per search without an account.
+
 ## Logging in to Libera.Chat (SASL)
 
 **△ → Servers... →** Libera.Chat **→ ✕** and fill in:
@@ -298,6 +326,8 @@ your servers, channels, settings and history in `ux0:data/VitaIRC/` are kept.
 | `ux0:data/VitaIRC/logs/<server>/<channel>.log` | Chat history (plain text, trimmed automatically at 512 KB) |
 | `ux0:data/VitaIRC/session.txt` | Open windows, their translation settings and mute |
 | `ux0:data/VitaIRC/uploads.txt` | Your uploaded image links (and ImgBB delete links) |
+| `ux0:data/VitaIRC/favorites.txt`, `favthumbs/` | Image search favorites and their thumbnails |
+| `ux0:picture/VitaIRC/` | Images saved from the search |
 | `ux0:data/VitaIRC/trcache.txt` | Translation cache |
 | `ux0:data/VitaIRC/usage.txt` | OpenAI token counters |
 | `ux0:data/VitaIRC/photos/` | Photos taken with the camera |
@@ -320,7 +350,7 @@ Requirements: [VitaSDK](https://vitasdk.org) and CMake.
 
 ```sh
 # install VitaSDK (see vitasdk.org), then the libraries:
-vdpm install libvita2d freetype curl-mbedtls mbedtls zlib libpng
+vdpm install libvita2d freetype libwebp curl-mbedtls mbedtls zlib libpng
 
 export VITASDK=/usr/local/vitasdk   # or wherever you installed it
 git clone https://github.com/ArchelKrozt/VitaIRC.git
@@ -344,6 +374,8 @@ VPK attached.
 | `src/main.c` | UI (vita2d), input, on-screen keyboard, screens and menus |
 | `src/irc.c` | IRC protocol, one thread per server, channels, users, commands |
 | `src/conn.c` | Sockets + TLS (mbedTLS) |
+| `src/booru.c` | Image search (Safebooru, Danbooru, Sankaku), content filter, favorites |
+| `src/imgutil.c` | WebP decoding, JPEG saving for the viewer and the search |
 | `src/net.c` | HTTP worker: translation (Google / OpenAI), image uploads (Litterbox, ImgBB, Imgur, soju FILEHOST), downloads, update check (libcurl) |
 | `src/history.c` | Chat logs and open-window session |
 | `src/config.c` | `config.ini` reading and writing |
@@ -375,7 +407,7 @@ VPK attached.
 - [VitaSDK](https://vitasdk.org) and the people behind [HENkaku](https://henkaku.xyz) / Ensō.
 - [vita2d](https://github.com/xerpi/libvita2d), [mbedTLS](https://www.trustedfirmware.org/projects/mbed-tls/),
   [libcurl](https://curl.se), [libjpeg-turbo](https://libjpeg-turbo.org), [zlib](https://zlib.net), [libpng](http://www.libpng.org),
-  [FreeType](https://freetype.org).
+  [FreeType](https://freetype.org), [libwebp](https://chromium.googlesource.com/webm/libwebp).
 - [Noto Emoji](https://github.com/google/fonts/tree/main/ofl/notoemoji) by Google, under the SIL Open Font License 1.1.
 - [Vita3K](https://vita3k.org), used to test the interface.
 

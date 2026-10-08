@@ -168,6 +168,26 @@ char *mj_str(const char *val)
 	return out;
 }
 
+char *mj_scalar(const char *val)
+{
+	const char *p = ws(val);
+	if (!p || !*p)
+		return NULL;
+	if (*p == '"')
+		return mj_str(p);
+	if (*p == '{' || *p == '[' || !strncmp(p, "null", 4))
+		return NULL;
+	const char *e = skip_value(p);
+	if (!e || e == p)
+		return NULL;
+	char *out = malloc(e - p + 1);
+	if (!out)
+		return NULL;
+	memcpy(out, p, e - p);
+	out[e - p] = 0;
+	return out;
+}
+
 void mj_append_raw(char **buf, size_t *len, const char *s)
 {
 	size_t n = strlen(s);

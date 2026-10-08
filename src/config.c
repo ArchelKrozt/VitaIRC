@@ -83,6 +83,10 @@ static void apply_general(const char *k, const char *v)
 	else if (!strcmp(k, "imgbb_expire")) g_cfg.imgbb_expire = atoi(v);
 	else if (!strcmp(k, "litterbox_time")) g_cfg.litter_time = atoi(v);
 	else if (!strcmp(k, "update_check")) g_cfg.update_check = atoi(v);
+	else if (!strcmp(k, "search_adult")) g_cfg.booru_adult = atoi(v);
+	else if (!strcmp(k, "search_engine")) g_cfg.booru_engine = atoi(v);
+	else if (!strcmp(k, "sankaku_user")) SETS(g_cfg.sankaku_user, v);
+	else if (!strcmp(k, "sankaku_password")) SETS(g_cfg.sankaku_pass, v);
 	else if (!strcmp(k, "update_repo"))  SETS(g_cfg.update_repo, v);
 	else if (!strcmp(k, "update_last"))  SETS(g_cfg.update_last, v);
 	else if (!strcmp(k, "show_joins"))   g_cfg.show_joins = atoi(v);
@@ -165,6 +169,8 @@ void config_load(void)
 	/* a placeholder saved by an older build follows the compiled-in default */
 	if (!g_cfg.update_repo[0] || !strncmp(g_cfg.update_repo, "YOUR_", 5))
 		strcpy(g_cfg.update_repo, UPDATE_REPO);
+	if (g_cfg.booru_engine < 0 || g_cfg.booru_engine > 2)
+		g_cfg.booru_engine = 0;
 	if (g_cfg.litter_time < 0 || g_cfg.litter_time > 3)
 		g_cfg.litter_time = 3;
 	if (g_cfg.imgbb_expire < 0 || g_cfg.imgbb_expire > 4)
@@ -193,6 +199,10 @@ int config_save(void)
 	fprintf(f, "imgbb_expire=%d\n", g_cfg.imgbb_expire);
 	fprintf(f, "litterbox_time=%d\n", g_cfg.litter_time);
 	fprintf(f, "update_check=%d\n", g_cfg.update_check);
+	fprintf(f, "search_adult=%d\n", g_cfg.booru_adult);
+	fprintf(f, "search_engine=%d\n", g_cfg.booru_engine);
+	fprintf(f, "sankaku_user=%s\n", g_cfg.sankaku_user);
+	fprintf(f, "sankaku_password=%s\n", g_cfg.sankaku_pass);
 	fprintf(f, "update_repo=%s\n", g_cfg.update_repo);
 	fprintf(f, "update_last=%s\n", g_cfg.update_last);
 	fprintf(f, "show_joins=%d\n", g_cfg.show_joins);

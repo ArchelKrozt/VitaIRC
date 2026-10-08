@@ -1,7 +1,7 @@
 #ifndef VITAIRC_CONFIG_H
 #define VITAIRC_CONFIG_H
 
-#define APP_VERSION   "1.1"
+#define APP_VERSION   "1.2"
 #define DATA_DIR      "ux0:data/VitaIRC"
 #define CONFIG_PATH   DATA_DIR "/config.ini"
 #define CA_PATH       "app0:cacert.pem"
@@ -57,6 +57,12 @@ typedef struct {
 	char imgbb_key[80];
 	int  imgbb_expire;   /* index into the expiration choices, 0 = never */
 	int  litter_time;    /* 0 = 1h, 1 = 12h, 2 = 24h, 3 = 72h */
+
+	/* Image search */
+	int  booru_adult;    /* allow questionable/explicit results (confirmed 18+) */
+	int  booru_engine;   /* BE_* last used */
+	char sankaku_user[64];
+	char sankaku_pass[128];
 
 	/* Updates */
 	int  update_check;   /* look for a new release once a day */

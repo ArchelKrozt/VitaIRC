@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaIRC")
 set(VITA_TITLEID  "VIRC00001")
-set(VITA_VERSION  "01.10")
+set(VITA_VERSION  "01.20")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-format-truncation -Wno-stringop-truncation")
 
@@ -40,10 +40,13 @@ add_executable(${PROJECT_NAME}
   src/i18n.c
   src/camera.c
   src/sound.c
+  src/booru.c
+  src/imgutil.c
 )
 
 target_link_libraries(${PROJECT_NAME}
   vita2d
+  webpdecoder
   curl
   mbedtls
   mbedx509

@@ -37,7 +37,8 @@
 #include "camera.h"
 #include "sound.h"
 #include "history.h"
-#include "i18n.h"
+#include "booru.h"
+#include "imgutil.h"
 
 #define SCR_W 960
 #define SCR_H 544
@@ -470,7 +471,7 @@ static void touch_read(void)
 /* ------------------------------------------------------------------ */
 /* IME (on-screen keyboard)                                           */
 /* ------------------------------------------------------------------ */
-enum { IME_NONE, IME_CHAT, IME_JOIN, IME_PM, IME_NICK, IME_TOPIC, IME_FIELD, IME_FIELD_INT, IME_AWAY, IME_SEARCH, IME_KICK };
+enum { IME_NONE, IME_CHAT, IME_JOIN, IME_PM, IME_NICK, IME_TOPIC, IME_FIELD, IME_FIELD_INT, IME_AWAY, IME_SEARCH, IME_KICK, IME_BOORU };
 
 static struct {
 	int      active;
@@ -513,7 +514,7 @@ static void ime_open(int kind, const char *title, const char *initial, int maxle
 /* ------------------------------------------------------------------ */
 /* UI state                                                           */
 /* ------------------------------------------------------------------ */
-enum { SCR_CHAT, SCR_SERVERS, SCR_EDIT, SCR_SETTINGS, SCR_USERS, SCR_CHANLIST, SCR_FILES, SCR_HELP, SCR_IMAGE, SCR_CAMERA };
+enum { SCR_CHAT, SCR_SERVERS, SCR_EDIT, SCR_SETTINGS, SCR_USERS, SCR_CHANLIST, SCR_FILES, SCR_HELP, SCR_IMAGE, SCR_CAMERA, SCR_BOORU };
 
 static int screen = SCR_CHAT;
 static int list_sel, list_top;
@@ -527,7 +528,7 @@ enum {
 	A_SUB_TRANS, A_SUB_IMG, A_SUB_CHAN, A_CHAN_LANG_MENU, A_CHAN_LANG, A_SEARCH, A_JUMP, A_LAST_MENTION,
 	A_AWAY, A_BACK, A_CAMERA, A_CTX_IGNORE, A_U_PM, A_U_MENTION, A_U_WHOIS, A_U_IGNORE, A_U_MODE,
 	A_U_KICK, A_U_KICKBAN, A_PRESET, A_INVITE_JOIN, A_REACT_MENU, A_REACT, A_MUTE, A_COMPLETE,
-	A_UPLOADS, A_UPLOAD_ITEM, A_UPLOAD_DEL
+	A_UPLOADS, A_UPLOAD_ITEM, A_UPLOAD_DEL, A_BOORU, A_ADULT_ON
 };
 typedef struct { char label[160]; int action; int arg; } MenuItem;
 static MenuItem menu[32];
@@ -572,6 +573,18 @@ static char     u_nick[40];
 
 /* camera */
 static int      cam_back = 1;
+
+/* image search: tab 0 = results, 1 = favorites */
+#define BO_COLS 4
+#define BO_ROWS 2
+#define BO_PAGE (BO_COLS * BO_ROWS)
+static int      bo_tab;
+static int      bo_sel[2];
+static int      bo_page_shown[2] = { -1, -1 };
+static int      bo_chat_sidx = -1;      /* window the links go to */
+static uint32_t bo_chat_uid;
+static int      iv_booru;               /* the viewer shows a search result */
+static BPost    iv_post;
 
 /* reactions offered in the message menu */
 static const char *react_emojis[] = { "👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉", "👀", "✅" };
@@ -1354,7 +1367,7 @@ static int image_url(const char *url, char *direct, int n)
 	str_copy(path, url, sizeof(path));
 	path[strcspn(path, "?#")] = 0;
 	const char *ext = strrchr(path, '.');
-	if (ext && ext > strrchr(path, '/') && (!strcasecmp(ext, ".png") || !strcasecmp(ext, ".jpg") || !strcasecmp(ext, ".jpeg"))) {
+	if (ext && ext > strrchr(path, '/') && (!strcasecmp(ext, ".png") || !strcasecmp(ext, ".jpg") || !strcasecmp(ext, ".jpeg") || !strcasecmp(ext, ".webp"))) {
 		str_copy(direct, url, n);
 		return 1;
 	}
@@ -1449,6 +1462,7 @@ static void open_sub_img(void)
 	menu_add(b, A_UPLOAD);
 	menu_add(T("Tomar foto con la cámara y subirla"), A_CAMERA);
 	menu_add(T("Mis subidas recientes"), A_UPLOADS);
+	menu_add(T("Buscar imágenes (Safebooru, Danbooru, Sankaku)"), A_BOORU);
 	menu_add(T("Enlaces e imágenes del canal"), A_LINKS);
 	menu_open = 1;
 }
@@ -1757,15 +1771,13 @@ static void iv_decode(const unsigned char *buf, size_t len)
 {
 	iv_free();
 	iv_err[0] = 0;
-	if (len > 8 && buf[0] == 0x89 && buf[1] == 'P' && buf[2] == 'N' && buf[3] == 'G')
-		iv_tex = vita2d_load_PNG_buffer(buf);
-	else if (len > 3 && buf[0] == 0xFF && buf[1] == 0xD8)
-		iv_tex = vita2d_load_JPEG_buffer(buf, len);
-	else if (len > 4 && !memcmp(buf, "GIF8", 4)) {
+	if (img_is_gif(buf, len)) {
 		str_copy(iv_err, T("Los GIF no se pueden mostrar aquí. Ábrelo en el navegador."), sizeof(iv_err));
 		return;
-	} else {
-		str_copy(iv_err, T("Formato no soportado (solo PNG y JPG)."), sizeof(iv_err));
+	}
+	iv_tex = img_texture(buf, len, 2048);
+	if (!iv_tex && !(len > 3 && ((buf[0] == 0x89 && buf[1] == 'P') || (buf[0] == 0xFF && buf[1] == 0xD8))) && !img_is_webp(buf, len)) {
+		str_copy(iv_err, T("Formato no soportado (PNG, JPG o WebP)."), sizeof(iv_err));
 		return;
 	}
 	if (!iv_tex)
@@ -1781,8 +1793,25 @@ static void open_viewer_url(const char *direct, const char *orig)
 	iv_upload[0] = 0;
 	iv_err[0] = 0;
 	iv_loading = 1;
+	iv_booru = 0;
 	iv_return = screen;
 	img_fetch_request(direct);
+	screen = SCR_IMAGE;
+}
+
+static void open_viewer_booru(const BPost *p)
+{
+	iv_free();
+	booru_page_url(p, iv_url, sizeof(iv_url));
+	iv_upload[0] = 0;
+	iv_err[0] = 0;
+	iv_loading = 1;
+	iv_booru = 1;
+	iv_post = *p;
+	iv_post.tex = NULL;
+	iv_post.raw = NULL;
+	iv_return = SCR_BOORU;
+	booru_view(p);
 	screen = SCR_IMAGE;
 }
 
@@ -1792,6 +1821,7 @@ static void open_viewer_file(const char *path)
 	str_copy(iv_url, path, sizeof(iv_url));
 	str_copy(iv_upload, path, sizeof(iv_upload));
 	iv_loading = 0;
+	iv_booru = 0;
 	iv_return = SCR_FILES;
 	screen = SCR_IMAGE;
 	FILE *f = fopen(path, "rb");
@@ -1819,8 +1849,35 @@ static void image_input(void)
 		screen = iv_return;
 		return;
 	}
-	if (PRESSED(SCE_CTRL_TRIANGLE) && !iv_upload[0])
+	if (iv_booru) {
+		if (PRESSED(btn_ok)) {
+			Server *s = bo_chat_sidx >= 0 && bo_chat_sidx < g_nservers ? &g_servers[bo_chat_sidx] : NULL;
+			Chan *c = s ? irc_find_chan_uid(s, bo_chat_uid) : NULL;
+			if (!c || c->type == CH_STATUS) {
+				ui_toast(T("Abre un canal o privado antes de buscar para poder enviar"));
+			} else {
+				booru_send(&iv_post, s->idx, c->uid);
+				ui_toast(T("Preparando el enlace para %s..."), c->name);
+				iv_free();
+				iv_loading = 0;
+				set_view(s->idx, c->uid);
+				screen = SCR_CHAT;
+			}
+			return;
+		}
+		if (PRESSED(SCE_CTRL_SQUARE)) {
+			int fav = booru_fav_toggle(&iv_post, iv_tex);
+			ui_toast(fav ? T("Agregada a favoritos") : T("Quitada de favoritos"));
+		}
+		if (PRESSED(SCE_CTRL_TRIANGLE)) {
+			booru_save(&iv_post);
+			ui_toast(T("Guardando en ux0:picture/VitaIRC..."));
+		}
+		if (PRESSED(SCE_CTRL_SELECT))
+			open_browser(iv_url);
+	} else if (PRESSED(SCE_CTRL_TRIANGLE) && !iv_upload[0]) {
 		open_browser(iv_url);
+	}
 	if (PRESSED(btn_ok) && iv_upload[0]) {
 		Server *s = cur_server();
 		Chan *c = cur_chan();
@@ -1938,7 +1995,12 @@ static void draw_image_screen(void)
 	} else if (iv_err[0]) {
 		draw_text_fit(30, top + h / 2 - lh, SCR_W - 60, C_ERR, iv_err);
 	}
-	if (iv_upload[0]) {
+	if (iv_booru) {
+		const int g[] = { glyph_ok, G_SQUARE, G_TRIANGLE, G_L, G_R, glyph_back };
+		const char *l[] = { T("Enviar al chat"), booru_is_fav(iv_post.engine, iv_post.id) ? T("Quitar favorito") : T("Favorito"),
+		                    T("Guardar en la Vita"), "", "Zoom", T("Volver") };
+		draw_bottombar_hints(6, g, l);
+	} else if (iv_upload[0]) {
 		char up[64];
 		snprintf(up, sizeof(up), T("Subir a %s"), img_host_name(g_cfg.img_host));
 		const int g[] = { glyph_ok, G_L, G_R, glyph_back };
@@ -1958,6 +2020,7 @@ static void open_quick(void);
 static void open_links(void);
 static void open_viewer_url(const char *direct, const char *orig);
 static void open_viewer_file(const char *path);
+static void booru_enter(void);
 static void open_sub_trans(void);
 static void open_sub_img(void);
 static void open_sub_chan(void);
@@ -2268,6 +2331,11 @@ static void do_action(int a)
 	case A_UPLOADS:
 		open_uploads();
 		break;
+	case A_BOORU:
+		bo_chat_sidx = (s && c && c->type != CH_STATUS) ? s->idx : -1;
+		bo_chat_uid = c ? c->uid : 0;
+		booru_enter();
+		break;
 	case A_UPLOAD_ITEM:
 		open_chat_ime(up_link[menu_arg]);
 		break;
@@ -2371,6 +2439,10 @@ static void confirm_input(void)
 			return;
 		if (confirm_action == A_EXIT) {
 			app_running = 0;
+		} else if (confirm_action == A_ADULT_ON) {
+			g_cfg.booru_adult = 1;
+			config_save();
+			ui_toast(T("Contenido para adultos activado (las búsquedas nuevas lo incluyen)"));
 		} else if (confirm_action == A_INVITE_JOIN) {
 			char b[80];
 			snprintf(b, sizeof(b), "/join %s", g_invite_chan);
@@ -2723,6 +2795,7 @@ static void draw_edit_screen(void)
 /* Settings                                                           */
 /* ------------------------------------------------------------------ */
 enum { S_TRPROV, S_KEY, S_MODEL, S_LANG_IN, S_LANG_OUT, S_USAGE, S_IMGHOST, S_IMGEXP, S_IMGBB, S_IMGUR,
+       S_ADULT, S_SKUSER, S_SKPASS,
        S_HIGHLIGHT, S_IGNORE, S_SOUND, S_COLORS, S_JOINS, S_AWAKE, S_CPU, S_FONT, S_UILANG, S_UPDATE, S_ABOUT, S_COUNT };
 
 static const char *litter_names[] = { "1 hora", "12 horas", "24 horas", "72 horas" };
@@ -2762,6 +2835,18 @@ static void settings_label(int f, char *label, char *value, int n)
 			snprintf(value, n, "< %s >", T(imgbb_exp_names[g_cfg.imgbb_expire]));
 		else
 			snprintf(value, n, T("(lo decide el servicio)"));
+		break;
+	case S_ADULT:
+		strcpy(label, T("Búsqueda: contenido adulto"));
+		snprintf(value, n, "%s", g_cfg.booru_adult ? T("Sí (mayor de 18)") : T("No (solo general)"));
+		break;
+	case S_SKUSER:
+		strcpy(label, T("Usuario de Sankaku"));
+		snprintf(value, n, "%s", g_cfg.sankaku_user[0] ? g_cfg.sankaku_user : T("(opcional)"));
+		break;
+	case S_SKPASS:
+		strcpy(label, T("Contraseña de Sankaku"));
+		snprintf(value, n, "%s", g_cfg.sankaku_pass[0] ? "********" : T("(opcional)"));
 		break;
 	case S_IMGBB:
 		strcpy(label, T("API key de ImgBB"));
@@ -2888,6 +2973,16 @@ static void settings_input(void)
 		case S_KEY:   ime.field = g_cfg.openai_key; ime.fieldlen = sizeof(g_cfg.openai_key); ime_open(IME_FIELD, T("API key de OpenAI (sk-...)"), g_cfg.openai_key, 250, 0, 0); break;
 		case S_MODEL: ime.field = g_cfg.openai_model; ime.fieldlen = sizeof(g_cfg.openai_model); ime_open(IME_FIELD, T("Modelo (ej: gpt-4o-mini)"), g_cfg.openai_model, 46, 0, 0); break;
 		case S_IMGUR: ime.field = g_cfg.imgur_id; ime.fieldlen = sizeof(g_cfg.imgur_id); ime_open(IME_FIELD, T("Client-ID de Imgur"), g_cfg.imgur_id, 60, 0, 0); break;
+		case S_ADULT:
+			if (g_cfg.booru_adult) {
+				g_cfg.booru_adult = 0;
+				changed = 1;
+			} else {
+				ask_confirm(T("¿Mostrar contenido adulto en búsquedas? Solo si eres mayor de 18."), A_ADULT_ON, 0);
+			}
+			break;
+		case S_SKUSER: ime.field = g_cfg.sankaku_user; ime.fieldlen = sizeof(g_cfg.sankaku_user); ime_open(IME_FIELD, T("Usuario de Sankaku"), g_cfg.sankaku_user, 62, 0, 0); break;
+		case S_SKPASS: ime.field = g_cfg.sankaku_pass; ime.fieldlen = sizeof(g_cfg.sankaku_pass); ime_open(IME_FIELD, T("Contraseña de Sankaku"), "", 126, 1, 0); break;
 		case S_IMGBB: ime.field = g_cfg.imgbb_key; ime.fieldlen = sizeof(g_cfg.imgbb_key); ime_open(IME_FIELD, T("API key de ImgBB (api.imgbb.com)"), g_cfg.imgbb_key, 78, 0, 0); break;
 		case S_UPDATE:
 			if (upd_url[0]) {
@@ -3172,6 +3267,260 @@ static void draw_files_screen(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Image search (booru) and favorites                                 */
+/* ------------------------------------------------------------------ */
+static BPost *bo_list(void) { return bo_tab ? g_bfav : g_bres; }
+static int    bo_count(void) { return bo_tab ? g_bfav_n : g_bres_n; }
+
+static void bo_free_tex(BPost *list, int n, int keep_from, int keep_to)
+{
+	int waited = 0;
+	for (int i = 0; i < n; i++) {
+		if (i >= keep_from && i < keep_to)
+			continue;
+		if (list[i].tex) {
+			if (!waited) {
+				vita2d_wait_rendering_done();
+				waited = 1;
+			}
+			vita2d_free_texture(list[i].tex);
+			list[i].tex = NULL;
+		}
+		free(list[i].raw);
+		list[i].raw = NULL;
+		if (list[i].tstate != TS_LOADING)
+			list[i].tstate = TS_NONE;
+	}
+}
+
+static void booru_enter(void)
+{
+	screen = SCR_BOORU;
+	bo_page_shown[0] = bo_page_shown[1] = -1;
+	if (!bo_tab && !g_bres_n && !g_bres_loading && !g_bres_query[0]) {
+		ime.sidx = 0;
+		ime_open(IME_BOORU, T("Buscar imágenes (etiquetas en inglés, ej: scenery cat)"), "", 120, 0, 0);
+	}
+}
+
+static void booru_leave(void)
+{
+	bo_free_tex(g_bres, g_bres_n, 0, 0);
+	bo_free_tex(g_bfav, g_bfav_n, 0, 0);
+	bo_page_shown[0] = bo_page_shown[1] = -1;
+	screen = SCR_CHAT;
+}
+
+/* Thumbnails of the visible page: request, decode (one per frame) and
+ * release the textures of other pages. */
+static void bo_update_thumbs(void)
+{
+	BPost *list = bo_list();
+	int n = bo_count();
+	int first = bo_sel[bo_tab] / BO_PAGE * BO_PAGE;
+	if (bo_page_shown[bo_tab] != first) {
+		bo_free_tex(list, n, first, first + BO_PAGE);
+		bo_page_shown[bo_tab] = first;
+	}
+	int decoded = 0;
+	for (int i = first; i < n && i < first + BO_PAGE; i++) {
+		BPost *p = &list[i];
+		if (bo_tab == 0 && p->tstate == TS_NONE) {
+			booru_thumb(i);
+		} else if (bo_tab == 1 && p->tstate == TS_NONE && !decoded) {
+			char path[128];
+			booru_fav_thumb_path(p, path, sizeof(path));
+			FILE *f = fopen(path, "rb");
+			p->tstate = TS_ERROR;
+			if (f) {
+				fseek(f, 0, SEEK_END);
+				long len = ftell(f);
+				fseek(f, 0, SEEK_SET);
+				unsigned char *buf = len > 0 && len < 2 * 1024 * 1024 ? malloc(len) : NULL;
+				if (buf && fread(buf, 1, len, f) == (size_t)len && (p->tex = img_texture(buf, len, 240)))
+					p->tstate = TS_READY;
+				free(buf);
+				fclose(f);
+			}
+			decoded = 1;
+			g_dirty = 1;
+		} else if (p->tstate == TS_RAW && !decoded) {
+			p->tex = img_texture(p->raw, p->rawlen, 240);
+			p->tstate = p->tex ? TS_READY : TS_ERROR;
+			free(p->raw);
+			p->raw = NULL;
+			decoded = 1;
+			g_dirty = 1;
+		}
+	}
+	/* close to the end of the results: fetch the next page */
+	if (bo_tab == 0 && g_bres_more && !g_bres_loading && bo_sel[0] >= g_bres_n - BO_PAGE)
+		booru_more();
+}
+
+static void bo_cell(int k, int *x, int *y, int *w, int *h)
+{
+	int top = TOP_H + 8, avail_h = SCR_H - TOP_H - BOT_H - 16;
+	*w = (SCR_W - 24 - (BO_COLS - 1) * 10) / BO_COLS;
+	*h = (avail_h - (BO_ROWS - 1) * 10) / BO_ROWS;
+	*x = 12 + (k % BO_COLS) * (*w + 10);
+	*y = top + (k / BO_COLS) * (*h + 10);
+}
+
+static void booru_input(void)
+{
+	BPost *list = bo_list();
+	int n = bo_count();
+	int *sel = &bo_sel[bo_tab];
+	if (PRESSED(btn_back)) {
+		booru_leave();
+		return;
+	}
+	if (PRESSED(SCE_CTRL_START)) {
+		bo_tab = !bo_tab;
+		bo_page_shown[bo_tab] = -1;
+		return;
+	}
+	if (PRESSED(SCE_CTRL_TRIANGLE)) {
+		ime.sidx = 0;
+		ime_open(IME_BOORU, T("Buscar imágenes (etiquetas en inglés, ej: scenery cat)"), g_bres_query, 120, 0, 0);
+		return;
+	}
+	if (PRESSED(SCE_CTRL_SELECT) && bo_tab == 0) {
+		g_cfg.booru_engine = (g_cfg.booru_engine + 1) % BE_COUNT;
+		config_save();
+		if (g_bres_query[0] || g_bres_n) {
+			bo_free_tex(g_bres, g_bres_n, 0, 0);
+			booru_search(g_cfg.booru_engine, g_bres_query);
+			bo_sel[0] = 0;
+			bo_page_shown[0] = -1;
+		}
+		return;
+	}
+	if (REPEAT(SCE_CTRL_LEFT))  (*sel)--;
+	if (REPEAT(SCE_CTRL_RIGHT)) (*sel)++;
+	if (REPEAT(SCE_CTRL_UP))    *sel -= BO_COLS;
+	if (REPEAT(SCE_CTRL_DOWN))  *sel += BO_COLS;
+	if (REPEAT(SCE_CTRL_LTRIGGER)) *sel -= BO_PAGE;
+	if (REPEAT(SCE_CTRL_RTRIGGER)) *sel += BO_PAGE;
+	if (*sel >= n) *sel = n - 1;
+	if (*sel < 0) *sel = 0;
+	int open = PRESSED(btn_ok);
+	if (touch_tap) {
+		int first = *sel / BO_PAGE * BO_PAGE;
+		for (int k = 0; k < BO_PAGE && first + k < n; k++) {
+			int x, y, w, h;
+			bo_cell(k, &x, &y, &w, &h);
+			if (touch_tap_x >= x && touch_tap_x < x + w && touch_tap_y >= y && touch_tap_y < y + h) {
+				if (*sel == first + k)
+					open = 1;
+				*sel = first + k;
+			}
+		}
+	}
+	/* swipe left / right: change page */
+	static int swiped;
+	if (touch_down && touch_moved && !swiped && abs(touch_x - touch_sx) > 120) {
+		*sel += touch_x < touch_sx ? BO_PAGE : -BO_PAGE;
+		if (*sel >= n) *sel = n - 1;
+		if (*sel < 0) *sel = 0;
+		swiped = 1;
+	}
+	if (!touch_down)
+		swiped = 0;
+	if (!n)
+		return;
+	if (open) {
+		open_viewer_booru(&list[*sel]);
+		return;
+	}
+	if (PRESSED(SCE_CTRL_SQUARE)) {
+		BPost p = list[*sel];
+		int fav = booru_fav_toggle(&p, p.tex);
+		ui_toast(fav ? T("Agregada a favoritos") : T("Quitada de favoritos"));
+		if (bo_tab == 1) {
+			bo_page_shown[1] = -1;
+			if (bo_sel[1] >= g_bfav_n) bo_sel[1] = g_bfav_n - 1;
+			if (bo_sel[1] < 0) bo_sel[1] = 0;
+		}
+	}
+}
+
+static void draw_booru_screen(void)
+{
+	bo_update_thumbs();
+	BPost *list = bo_list();
+	int n = bo_count();
+	char title[96], sub[200];
+	if (bo_tab == 0) {
+		snprintf(title, sizeof(title), T("Buscar imágenes · %s"), booru_engine_name(g_bres_engine));
+		snprintf(sub, sizeof(sub), "%s%s%s  ·  %s", g_bres_query[0] ? "\"" : "", g_bres_query, g_bres_query[0] ? "\"" : "",
+		         g_cfg.booru_adult ? T("incluye adulto") : T("solo general"));
+	} else {
+		snprintf(title, sizeof(title), "%s", T("Favoritos"));
+		snprintf(sub, sizeof(sub), T("%d guardados en la tarjeta"), g_bfav_n);
+	}
+	vita2d_draw_rectangle(0, TOP_H, SCR_W, SCR_H - TOP_H, C_BG);
+	draw_topbar(title, sub);
+
+	int sel = bo_sel[bo_tab];
+	int first = sel / BO_PAGE * BO_PAGE;
+	for (int k = 0; k < BO_PAGE && first + k < n; k++) {
+		BPost *p = &list[first + k];
+		int x, y, w, h;
+		bo_cell(k, &x, &y, &w, &h);
+		vita2d_draw_rectangle(x, y, w, h, first + k == sel ? C_SEL : C_PANEL);
+		if (p->tex) {
+			float tw = vita2d_texture_get_width(p->tex), th = vita2d_texture_get_height(p->tex);
+			float sc = (w - 8) / tw < (h - 8) / th ? (w - 8) / tw : (h - 8) / th;
+			if (sc > 1.6f) sc = 1.6f;
+			vita2d_draw_texture_scale(p->tex, x + (w - tw * sc) / 2, y + (h - th * sc) / 2, sc, sc);
+		} else {
+			const char *t = p->tstate == TS_ERROR ? T("sin vista previa") : "...";
+			draw_text(x + (w - text_w(t)) / 2, y + h / 2 - lh / 2, C_FAINT, t);
+		}
+		if (booru_is_fav(p->engine, p->id))
+			draw_text(x + w - text_w("★") - 8, y + 4, C_ACCENT, "★");
+		if (p->rating == 'q' || p->rating == 'e') {
+			const char *r = p->rating == 'e' ? "E" : "Q";
+			vita2d_draw_rectangle(x + 4, y + 4, text_w(r) + 10, lh, C_ERR);
+			draw_text(x + 9, y + 4, C_TEXT, r);
+		}
+		if (first + k == sel) {
+			draw_rect_outline(x, y, w, h, C_ACCENT);
+			draw_rect_outline(x + 1, y + 1, w - 2, h - 2, C_ACCENT);
+		}
+	}
+	int cy = TOP_H + (SCR_H - TOP_H - BOT_H) / 2 - lh;
+	if (!n) {
+		const char *msg = bo_tab ? T("Aún no tienes favoritos. En los resultados, □ guarda una imagen.")
+		                : g_bres_loading ? T("Buscando...")
+		                : g_bres_err[0] ? g_bres_err
+		                : g_bres_query[0] || g_bres_engine != g_cfg.booru_engine ? T("Sin resultados.")
+		                : T("Pulsa △ para buscar (etiquetas en inglés, ej: scenery cat).");
+		draw_text_fit((SCR_W - text_w(msg)) / 2 > 20 ? (SCR_W - text_w(msg)) / 2 : 20, cy, SCR_W - 40,
+		              g_bres_err[0] && !bo_tab ? C_ERR : C_DIM, msg);
+	} else {
+		char info[64];
+		int pages = (n + BO_PAGE - 1) / BO_PAGE;
+		snprintf(info, sizeof(info), "%d / %d%s", first / BO_PAGE + 1, pages,
+		         bo_tab == 0 && (g_bres_more || g_bres_loading) ? "+" : "");
+		draw_text(SCR_W - 14 - text_w(info), SCR_H - BOT_H - lh - 2, C_DIM, info);
+	}
+	const int g[] = { glyph_ok, G_SQUARE, G_TRIANGLE, G_START, glyph_back };
+	char eng[48];
+	snprintf(eng, sizeof(eng), "%s", bo_tab ? T("Resultados") : T("Favoritos"));
+	const char *l[] = { T("Ver"), T("Favorito"), T("Buscar"), eng, T("Volver") };
+	draw_bottombar_hints(5, g, l);
+	if (bo_tab == 0) {
+		char sw[64];
+		snprintf(sw, sizeof(sw), "SELECT: %s", T("cambiar servicio"));
+		int ty = SCR_H - BOT_H + (BOT_H - lh) / 2;
+		draw_text(SCR_W - 14 - text_w(sw), ty, C_DIM, sw);
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* Help                                                               */
 /* ------------------------------------------------------------------ */
 static void draw_help_screen(void)
@@ -3351,6 +3700,19 @@ static void ime_apply(char *text)
 		snprintf(cmd, sizeof(cmd), "/kick %s %s", u_nick, text);
 		irc_user_input(ime.sidx, ime.uid, cmd);
 		screen = SCR_CHAT;
+		break;
+	case IME_BOORU:
+		str_trim(text);
+		for (int i = 0; i < g_bres_n; i++)
+			if (g_bres[i].tex) {
+				vita2d_wait_rendering_done();
+				vita2d_free_texture(g_bres[i].tex);
+				g_bres[i].tex = NULL;
+			}
+		booru_search(g_cfg.booru_engine, text);
+		bo_tab = 0;
+		bo_sel[0] = 0;
+		bo_page_shown[0] = -1;
 		break;
 	case IME_FIELD_INT:
 		if (text[0])
@@ -3545,8 +3907,44 @@ static void demo_tick(void)
 		strcpy(demo_shot, "18_react");
 		break;
 	case 18: screen = SCR_SETTINGS; list_sel = S_TRPROV; strcpy(demo_shot, "19_settings_top"); break;
-	case 19: screen = SCR_CHAT; ask_confirm(T("¿Salir de VitaIRC? Se cerrarán las conexiones."), A_EXIT, 0); strcpy(demo_shot, "17_confirm"); break;
-	case 20: app_running = 0; break;
+	case 19:
+		g_cfg.booru_engine = BE_SAFEBOORU;
+		booru_search(BE_SAFEBOORU, "scenery");
+		bo_tab = 0;
+		bo_sel[0] = 5;
+		bo_page_shown[0] = -1;
+		screen = SCR_BOORU;
+		step_at = now_ms();
+		break;
+	case 20:
+		if (now_ms() - step_at < 15000)
+			return;
+		strcpy(demo_shot, "20_search");
+		break;
+	case 21:
+		if (g_bres_n > 5) {
+			if (booru_is_fav(g_bres[5].engine, g_bres[5].id))   /* left over from an earlier run */
+				booru_fav_toggle(&g_bres[5], NULL);
+			booru_fav_toggle(&g_bres[5], g_bres[5].tex);
+			open_viewer_booru(&g_bres[5]);
+		}
+		step_at = now_ms();
+		break;
+	case 22: strcpy(demo_shot, "21_search_view"); break;
+	case 23: iv_free(); screen = SCR_BOORU; bo_tab = 1; bo_page_shown[1] = -1; step_at = now_ms(); break;
+	case 24:
+		if (now_ms() - step_at < 2000)
+			return;
+		strcpy(demo_shot, "22_favorites");
+		break;
+	case 25:
+		if (g_bres_n > 5 && booru_is_fav(g_bres[5].engine, g_bres[5].id))
+			booru_fav_toggle(&g_bres[5], NULL);      /* leave the emulator's favorites as they were */
+		screen = SCR_CHAT;
+		ask_confirm(T("¿Salir de VitaIRC? Se cerrarán las conexiones."), A_EXIT, 0);
+		strcpy(demo_shot, "17_confirm");
+		break;
+	case 26: app_running = 0; break;
 	}
 	demo_step++;
 	g_dirty = 1;
@@ -3651,6 +4049,7 @@ int main(void)
 	pthread_mutex_unlock(&g_lock);
 #endif
 	net_init();
+	booru_init();
 	sound_init();
 	check_wifi();
 #ifndef VITAIRC_DEMO
@@ -3712,6 +4111,7 @@ int main(void)
 			case SCR_HELP:     if (PRESSED(btn_back) || PRESSED(btn_ok) || touch_tap) screen = SCR_CHAT; break;
 			case SCR_IMAGE:    image_input(); break;
 			case SCR_CAMERA:   camera_input(); break;
+			case SCR_BOORU:    booru_input(); break;
 			}
 		}
 		if (g_invite_pending && !confirm_open && !menu_open && !ime.active) {
@@ -3803,6 +4203,7 @@ int main(void)
 		case SCR_HELP:     draw_help_screen(); break;
 		case SCR_IMAGE:    draw_image_screen(); break;
 		case SCR_CAMERA:   draw_camera_screen(); break;
+		case SCR_BOORU:    draw_booru_screen(); break;
 		}
 		if (menu_open)
 			draw_menu();

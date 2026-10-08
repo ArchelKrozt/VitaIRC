@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2
+
+- **Image search** on Safebooru, Danbooru and Sankaku: thumbnail grid, pages, open in the viewer,
+  **send to chat** (direct link, or re-uploaded for Sankaku's expiring links), **save to the Vita**
+  (`ux0:picture/VitaIRC/`) and **favorites** with their own tab and local thumbnails.
+- General content only by default; adult content is an opt-in setting with an 18+ confirmation.
+  Tags that sexualise minors are always filtered.
+- Optional Sankaku account in Settings.
+- The image viewer opens **WebP** images too.
+
 ## 1.1
 
 - **Free translation** with Google (no key needed); ChatGPT stays available as an option.

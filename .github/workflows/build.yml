@@ -27,7 +27,7 @@ jobs:
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
 
       - name: Install libraries
-        run: yes | vdpm install libvita2d freetype curl-mbedtls mbedtls zlib libpng
+        run: yes | vdpm install libvita2d freetype libwebp curl-mbedtls mbedtls zlib libpng
 
       - name: Build
         run: ./build.sh

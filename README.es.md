@@ -39,6 +39,10 @@ a la escena de la Vita y es de código abierto.
 - **Silenciar** un canal (sin sonido ni avisos).
 - **Cola sin conexión**: lo que escribes desconectado se muestra atenuado y se envía al reconectar.
 - **Aviso de versión nueva** (consulta GitHub Releases una vez al día).
+- **Buscador de imágenes** (Safebooru, Danbooru y Sankaku) con cuadrícula de miniaturas,
+  **favoritos** guardados en la tarjeta, **guardar en la Vita** y **enviar al chat** con un botón.
+  Por defecto solo muestra contenido general; el contenido adulto se activa en Ajustes (18+), y las
+  etiquetas que sexualizan menores se filtran siempre.
 - **Colores, negritas y subrayado de IRC**, **palabras de alerta**, avisos y **sonido** en privados y menciones.
 - **Ignorar usuarios** (con comodines) y **protección contra flood** de privados.
 - **Herramientas de operador** desde la lista de usuarios: op, voz, kick y ban.
@@ -54,6 +58,14 @@ a la escena de la Vita y es de código abierto.
   cuenta), **ImgBB**, **Imgur** o **tu propio soju** (FILEHOST). *Mis subidas recientes* guarda los enlaces.
 - **Visor de imágenes** integrado (PNG/JPG con zoom); el resto de enlaces se abre en el navegador.
 - Interfaz en **español e inglés**, controles físicos y pantalla táctil.
+
+## Buscador de imágenes
+
+**△ → Imágenes... → Buscar imágenes**, con etiquetas en inglés (`scenery`, `cat_ears sky`...).
+✕ abre la imagen, □ favorito, △ nueva búsqueda, SELECT cambia de servicio, START alterna
+**Resultados / Favoritos**, L/R cambia de página. En la imagen: ✕ **enviar al chat**, □ favorito,
+△ **guardar** en `ux0:picture/VitaIRC/`. Los enlaces de Sankaku caducan en una hora, así que
+VitaIRC vuelve a subir la imagen con tu servicio de imágenes antes de enviarla.
 
 ## Instalación
 
@@ -107,7 +119,7 @@ mientras está abierta, y al volver de la suspensión se reconecta sola. Para no
 ## Compilar
 
 ```sh
-vdpm install libvita2d freetype curl-mbedtls mbedtls zlib libpng
+vdpm install libvita2d freetype libwebp curl-mbedtls mbedtls zlib libpng
 export VITASDK=/usr/local/vitasdk
 ./build.sh        # deja dist/VitaIRC.vpk
 ```
