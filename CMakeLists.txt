@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaIRC")
 set(VITA_TITLEID  "VIRC00001")
-set(VITA_VERSION  "01.00")
+set(VITA_VERSION  "01.10")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-format-truncation -Wno-stringop-truncation")
 
@@ -25,6 +25,8 @@ endif()
 if(VITAIRC_DEMO_EN)
   add_definitions(-DVITAIRC_DEMO -DVITAIRC_DEMO_EN)
 endif()
+
+include_directories($ENV{VITASDK}/arm-vita-eabi/include/freetype2)
 
 add_executable(${PROJECT_NAME}
   src/main.c
@@ -87,4 +89,6 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
   FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE res/cacert.pem cacert.pem
+  FILE res/NotoEmoji.ttf emoji.ttf
+  FILE res/NotoEmoji-OFL.txt NotoEmoji-OFL.txt
 )

@@ -1,0 +1,7 @@
+build/
+dist/
+*.vpk
+*.velf
+eboot.bin
+.DS_Store
+build-demo/

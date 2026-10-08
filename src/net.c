@@ -12,13 +12,14 @@
 #include "minijson.h"
 #include <psp2/rtc.h>
 
-#define TCACHE_PATH DATA_DIR "/trcache.txt"
-#define USAGE_PATH  DATA_DIR "/usage.txt"
+#define TCACHE_PATH  DATA_DIR "/trcache.txt"
+#define USAGE_PATH   DATA_DIR "/usage.txt"
+#define UPLOADS_PATH DATA_DIR "/uploads.txt"
 
 long g_usage_today, g_usage_total, g_usage_requests;
 static char usage_date[12];
 
-enum { JOB_TR_IN, JOB_TR_OUT, JOB_UPLOAD, JOB_FETCH };
+enum { JOB_TR_IN, JOB_TR_OUT, JOB_UPLOAD, JOB_FETCH, JOB_UPDATE };
 
 typedef struct {
 	int      type;
@@ -47,6 +48,10 @@ int            g_fetch_done;
 unsigned char *g_fetch_buf;
 size_t         g_fetch_len;
 char           g_fetch_err[160];
+int            g_update_done;
+char           g_update_tag[32];
+char           g_update_url[200];
+char           g_update_err[120];
 
 /* ---------------- translation cache ---------------- */
 
@@ -347,6 +352,215 @@ static char *openai_translate(const char *text, const char *lang, int outgoing, 
 	return result;
 }
 
+/* Google Translate's free web endpoint: no key, detects the source language. */
+static char *google_translate(const char *text, const char *lang, int outgoing, char *err, int errlen)
+{
+	char *q = curl_easy_escape(NULL, text, 0);
+	if (!q) {
+		snprintf(err, errlen, T("Error interno (JSON)"));
+		return NULL;
+	}
+	char *url = malloc(strlen(q) + 160);
+	if (!url) {
+		curl_free(q);
+		snprintf(err, errlen, T("Error interno (JSON)"));
+		return NULL;
+	}
+	sprintf(url, "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=%s&dt=t&q=%s",
+	        !strcmp(lang, "zh") ? "zh-CN" : lang, q);
+	curl_free(q);
+
+	Buf out = {0};
+	CURL *c = http_new(&out, 20);
+	curl_easy_setopt(c, CURLOPT_URL, url);
+	CURLcode rc = curl_easy_perform(c);
+	long code = 0;
+	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+	curl_easy_cleanup(c);
+	free(url);
+
+	char *result = NULL;
+	if (rc != CURLE_OK) {
+		snprintf(err, errlen, T("Red: %s"), curl_easy_strerror(rc));
+	} else if (code == 429) {
+		snprintf(err, errlen, T("Google: demasiadas traducciones, espera un momento"));
+	} else if (code >= 400 || !out.data) {
+		snprintf(err, errlen, "Google HTTP %ld", code);
+	} else {
+		/* [[["translated","original",...], ...], null, "detected-lang", ...] */
+		const char *segs = mj_at(out.data, 0);
+		size_t len = 0;
+		for (int i = 0; segs; i++) {
+			const char *seg = mj_at(segs, i);
+			if (!seg)
+				break;
+			char *t = mj_str(mj_at(seg, 0));
+			if (t)
+				mj_append_raw(&result, &len, t);
+			free(t);
+		}
+		char *src = mj_str(mj_at(out.data, 2));
+		if (!result) {
+			snprintf(err, errlen, "Google: %s", T("respuesta inválida"));
+		} else if (src && !strncasecmp(src, lang, 2)) {
+			/* already in that language */
+			free(result);
+			result = outgoing ? str_dup(text) : str_dup("");
+		} else {
+			str_trim(result);
+		}
+		free(src);
+	}
+	free(out.data);
+	return result;
+}
+
+const char *tr_provider_name(int p)
+{
+	return p == TRP_OPENAI ? "ChatGPT (OpenAI)" : T("Google (gratis)");
+}
+
+int tr_ready(void)
+{
+	return g_cfg.tr_provider != TRP_OPENAI || g_cfg.openai_key[0];
+}
+
+static char *translate(const char *text, const char *lang, int outgoing, char *err, int errlen)
+{
+	pthread_mutex_lock(&g_lock);
+	int prov = g_cfg.tr_provider;
+	pthread_mutex_unlock(&g_lock);
+	if (prov == TRP_OPENAI)
+		return openai_translate(text, lang, outgoing, err, errlen);
+	return google_translate(text, lang, outgoing, err, errlen);
+}
+
+/* ---------------- image uploads ---------------- */
+
+const char *img_host_name(int host)
+{
+	switch (host) {
+	case IMG_IMGBB:    return "ImgBB";
+	case IMG_FILEHOST: return "soju FILEHOST";
+	case IMG_IMGUR:    return "Imgur";
+	default:           return "Litterbox";
+	}
+}
+
+/* Caller holds g_lock */
+int img_host_ready(int sidx, char *why, int n)
+{
+	why[0] = 0;
+	switch (g_cfg.img_host) {
+	case IMG_IMGUR:
+		if (!g_cfg.imgur_id[0]) {
+			snprintf(why, n, T("Configura tu Client-ID de Imgur en Ajustes"));
+			return 0;
+		}
+		break;
+	case IMG_IMGBB:
+		if (!g_cfg.imgbb_key[0]) {
+			snprintf(why, n, T("Configura tu API key de ImgBB en Ajustes"));
+			return 0;
+		}
+		break;
+	case IMG_FILEHOST:
+		if (sidx < 0 || sidx >= g_nservers || !g_servers[sidx].filehost[0]) {
+			snprintf(why, n, T("Este servidor no ofrece FILEHOST (hace falta soju con file-upload)"));
+			return 0;
+		}
+		break;
+	}
+	return 1;
+}
+
+static const char *mime_of(const char *path)
+{
+	const char *e = strrchr(path, '.');
+	if (e && !strcasecmp(e, ".png"))  return "image/png";
+	if (e && (!strcasecmp(e, ".jpg") || !strcasecmp(e, ".jpeg"))) return "image/jpeg";
+	if (e && !strcasecmp(e, ".gif"))  return "image/gif";
+	if (e && !strcasecmp(e, ".webp")) return "image/webp";
+	return "application/octet-stream";
+}
+
+static long file_size(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return -1;
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fclose(f);
+	return size;
+}
+
+static char up_host[24];
+
+static int upload_progress(void *ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
+{
+	(void)ud; (void)dltotal; (void)dlnow;
+	static int last = -1;
+	int pct = ultotal > 0 ? (int)(ulnow * 100 / ultotal) : 0;
+	if (pct != last) {
+		last = pct;
+		char b[96];
+		snprintf(b, sizeof(b), T("Subiendo a %s: %d%%"), up_host, pct);
+		pthread_mutex_lock(&g_lock);
+		str_copy(g_net_busy, b, sizeof(g_net_busy));
+		g_dirty = 1;
+		pthread_mutex_unlock(&g_lock);
+	}
+	return g_app_quit;   /* abort when the app closes */
+}
+
+static void track_progress(CURL *c)
+{
+	curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+	curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, upload_progress);
+}
+
+/* multipart/form-data POST; extra = name, value, ..., NULL. Returns the response body. */
+static char *post_form(const char *url, struct curl_slist *hdr, const char *field, const char *path,
+                       const char *const *extra, long *code, char *err, int errlen)
+{
+	Buf out = {0};
+	CURL *c = http_new(&out, 300);
+	curl_mime *mime = curl_mime_init(c);
+	curl_mimepart *part = curl_mime_addpart(mime);
+	curl_mime_name(part, field);
+	if (curl_mime_filedata(part, path) != CURLE_OK) {
+		curl_mime_free(mime);
+		curl_easy_cleanup(c);
+		snprintf(err, errlen, T("No se pudo abrir el archivo"));
+		return NULL;
+	}
+	curl_mime_type(part, mime_of(path));
+	for (int i = 0; extra && extra[i]; i += 2) {
+		part = curl_mime_addpart(mime);
+		curl_mime_name(part, extra[i]);
+		curl_mime_data(part, extra[i + 1], CURL_ZERO_TERMINATED);
+	}
+	curl_easy_setopt(c, CURLOPT_URL, url);
+	if (hdr)
+		curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
+	curl_easy_setopt(c, CURLOPT_MIMEPOST, mime);
+	track_progress(c);
+	CURLcode rc = curl_easy_perform(c);
+	*code = 0;
+	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, code);
+	curl_mime_free(mime);
+	curl_easy_cleanup(c);
+	if (rc != CURLE_OK) {
+		snprintf(err, errlen, T("Red: %s"), curl_easy_strerror(rc));
+		free(out.data);
+		return NULL;
+	}
+	if (!out.data)
+		out.data = str_dup("");
+	return out.data;
+}
+
 static char *imgur_upload(const char *path, char *err, int errlen)
 {
 	char cid[64];
@@ -357,76 +571,342 @@ static char *imgur_upload(const char *path, char *err, int errlen)
 		snprintf(err, errlen, T("Falta el Client-ID de Imgur (Ajustes)"));
 		return NULL;
 	}
-	FILE *f = fopen(path, "rb");
+	char auth[100];
+	snprintf(auth, sizeof(auth), "Authorization: Client-ID %s", cid);
+	struct curl_slist *hdr = curl_slist_append(NULL, auth);
+	static const char *const extra[] = { "type", "file", NULL };
+	long code;
+	char *r = post_form("https://api.imgur.com/3/image", hdr, "image", path, extra, &code, err, errlen);
+	curl_slist_free_all(hdr);
+	if (!r)
+		return NULL;
+	char *link = NULL;
+	const char *d = mj_get(r, "data");
+	char *l = mj_str(mj_get(d, "link"));
+	if (l && code < 300) {
+		link = l;
+	} else {
+		free(l);
+		const char *e = mj_get(d, "error");
+		char *em = mj_str(e);
+		if (!em)
+			em = mj_str(mj_get(e, "message"));
+		snprintf(err, errlen, "Imgur %ld: %.120s", code, em ? em : T("error desconocido"));
+		free(em);
+	}
+	free(r);
+	return link;
+}
+
+static const int imgbb_secs[] = { 0, 3600, 86400, 7 * 86400, 30 * 86400 };
+
+static char *imgbb_upload(const char *path, char **del, char *err, int errlen)
+{
+	char key[80];
+	int exp;
+	pthread_mutex_lock(&g_lock);
+	str_copy(key, g_cfg.imgbb_key, sizeof(key));
+	exp = imgbb_secs[g_cfg.imgbb_expire];
+	pthread_mutex_unlock(&g_lock);
+	if (!key[0]) {
+		snprintf(err, errlen, T("Configura tu API key de ImgBB en Ajustes"));
+		return NULL;
+	}
+	char url[200];
+	char *ek = curl_easy_escape(NULL, key, 0);
+	if (exp)
+		snprintf(url, sizeof(url), "https://api.imgbb.com/1/upload?key=%s&expiration=%d", ek ? ek : "", exp);
+	else
+		snprintf(url, sizeof(url), "https://api.imgbb.com/1/upload?key=%s", ek ? ek : "");
+	curl_free(ek);
+	long code;
+	char *r = post_form(url, NULL, "image", path, NULL, &code, err, errlen);
+	if (!r)
+		return NULL;
+	const char *d = mj_get(r, "data");
+	char *link = mj_str(mj_get(d, "url"));
+	if (link && code < 300) {
+		*del = mj_str(mj_get(d, "delete_url"));
+	} else {
+		free(link);
+		link = NULL;
+		char *em = mj_str(mj_get(mj_get(r, "error"), "message"));
+		if (!em)
+			em = mj_str(mj_get(r, "status_txt"));
+		snprintf(err, errlen, "ImgBB %ld: %.120s", code, em ? em : T("error desconocido"));
+		free(em);
+	}
+	free(r);
+	return link;
+}
+
+static char *litterbox_upload(const char *path, char *err, int errlen)
+{
+	static const char *times[] = { "1h", "12h", "24h", "72h" };
+	pthread_mutex_lock(&g_lock);
+	const char *t = times[g_cfg.litter_time];
+	pthread_mutex_unlock(&g_lock);
+	const char *const extra[] = { "reqtype", "fileupload", "time", t, NULL };
+	long code;
+	char *r = post_form("https://litterbox.catbox.moe/resources/internals/api.php", NULL, "fileToUpload", path,
+	                    extra, &code, err, errlen);
+	if (!r)
+		return NULL;
+	str_trim(r);
+	if (code < 300 && !strncmp(r, "https://", 8) && !strchr(r, ' '))
+		return r;
+	snprintf(err, errlen, "Litterbox %ld: %.120s", code, r[0] ? r : T("error desconocido"));
+	free(r);
+	return NULL;
+}
+
+static char fh_location[300];
+
+static size_t header_cb(char *buf, size_t size, size_t n, void *ud)
+{
+	(void)ud;
+	size_t len = size * n;
+	if (len > 9 && !strncasecmp(buf, "Location:", 9)) {
+		const char *v = buf + 9;
+		while (*v == ' ' || *v == '\t')
+			v++;
+		int k = 0;
+		while (v < buf + len && *v != '\r' && *v != '\n' && k < (int)sizeof(fh_location) - 1)
+			fh_location[k++] = *v++;
+		fh_location[k] = 0;
+	}
+	return len;
+}
+
+static size_t read_cb(char *buf, size_t size, size_t n, void *ud)
+{
+	return fread(buf, 1, size * n, (FILE *)ud);
+}
+
+/* "https://host:port/path" -> "https://host:port" */
+static void url_origin(const char *url, char *out, int n)
+{
+	str_copy(out, url, n);
+	char *p = strstr(out, "://");
+	if (p && (p = strchr(p + 3, '/')))
+		*p = 0;
+}
+
+/* soju.im/FILEHOST: raw POST with the IRC account (HTTP Basic), answer 201 + Location. */
+static char *filehost_upload(int sidx, const char *path, char *err, int errlen)
+{
+	char url[256], user[48], pass[128], host[128];
+	int ssl, cert_ok;
+	pthread_mutex_lock(&g_lock);
+	Server *s = &g_servers[sidx];
+	str_copy(url, s->filehost, sizeof(url));
+	str_copy(user, s->cfg.user[0] ? s->cfg.user : s->cfg.nick, sizeof(user));
+	str_copy(pass, s->cfg.password, sizeof(pass));
+	str_copy(host, s->cfg.host, sizeof(host));
+	ssl = s->cfg.ssl;
+	cert_ok = s->conn.cert_ok;
+	pthread_mutex_unlock(&g_lock);
+
+	if (!url[0]) {
+		snprintf(err, errlen, T("Este servidor no ofrece FILEHOST (hace falta soju con file-upload)"));
+		return NULL;
+	}
+	if (ssl && strncmp(url, "https://", 8)) {
+		snprintf(err, errlen, T("FILEHOST sin cifrar rechazado: la conexión IRC usa SSL"));
+		return NULL;
+	}
+	if (!pass[0]) {
+		snprintf(err, errlen, T("FILEHOST necesita tu contraseña del bouncer (Servidores)"));
+		return NULL;
+	}
+	user[strcspn(user, "/@")] = 0;       /* soju: "user/network@client" -> "user" */
+
+	long size = file_size(path);
+	FILE *f = size > 0 ? fopen(path, "rb") : NULL;
 	if (!f) {
 		snprintf(err, errlen, T("No se pudo abrir el archivo"));
 		return NULL;
 	}
-	fseek(f, 0, SEEK_END);
-	long size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	if (size <= 0 || size > 10 * 1024 * 1024) {
-		fclose(f);
-		snprintf(err, errlen, T("La imagen debe pesar menos de 10 MB"));
-		return NULL;
-	}
-	unsigned char *data = malloc(size);
-	if (!data || fread(data, 1, size, f) != (size_t)size) {
-		fclose(f);
-		free(data);
-		snprintf(err, errlen, T("Error leyendo el archivo"));
-		return NULL;
-	}
-	fclose(f);
-
 	const char *fname = strrchr(path, '/');
 	fname = fname ? fname + 1 : path;
+	char safe[128], ct[64], cd[200];
+	int k = 0;
+	for (const char *p = fname; *p && k < (int)sizeof(safe) - 1; p++)
+		safe[k++] = (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) ? '_' : *p;
+	safe[k] = 0;
+	snprintf(ct, sizeof(ct), "Content-Type: %s", mime_of(path));
+	snprintf(cd, sizeof(cd), "Content-Disposition: attachment; filename=\"%s\"", safe);
+	struct curl_slist *hdr = curl_slist_append(NULL, ct);
+	hdr = curl_slist_append(hdr, cd);
+	hdr = curl_slist_append(hdr, "Expect:");
 
 	Buf out = {0};
-	CURL *c = http_new(&out, 120);
-	curl_mime *mime = curl_mime_init(c);
-	curl_mimepart *part = curl_mime_addpart(mime);
-	curl_mime_name(part, "image");
-	curl_mime_data(part, (const char *)data, size);
-	curl_mime_filename(part, fname);
-	part = curl_mime_addpart(mime);
-	curl_mime_name(part, "type");
-	curl_mime_data(part, "file", CURL_ZERO_TERMINATED);
-
-	char auth[100];
-	snprintf(auth, sizeof(auth), "Authorization: Client-ID %s", cid);
-	struct curl_slist *hdr = curl_slist_append(NULL, auth);
-	curl_easy_setopt(c, CURLOPT_URL, "https://api.imgur.com/3/image");
+	CURL *c = http_new(&out, 300);
+	curl_easy_setopt(c, CURLOPT_URL, url);
 	curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
-	curl_easy_setopt(c, CURLOPT_MIMEPOST, mime);
+	curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+	curl_easy_setopt(c, CURLOPT_USERNAME, user);
+	curl_easy_setopt(c, CURLOPT_PASSWORD, pass);
+	curl_easy_setopt(c, CURLOPT_POST, 1L);
+	curl_easy_setopt(c, CURLOPT_READFUNCTION, read_cb);
+	curl_easy_setopt(c, CURLOPT_READDATA, f);
+	curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)size);
+	curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, header_cb);
+	/* a bouncer with a self-signed certificate (already accepted for IRC) */
+	char origin[160];
+	url_origin(url, origin, sizeof(origin));
+	const char *uh = strstr(origin, "://");
+	uh = uh ? uh + 3 : origin;
+	if (!cert_ok && !strncasecmp(uh, host, strlen(host)) && (uh[strlen(host)] == 0 || uh[strlen(host)] == ':')) {
+		curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+		curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+	}
+	track_progress(c);
+	fh_location[0] = 0;
 	CURLcode rc = curl_easy_perform(c);
 	long code = 0;
 	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-	curl_mime_free(mime);
-	curl_slist_free_all(hdr);
 	curl_easy_cleanup(c);
-	free(data);
+	curl_slist_free_all(hdr);
+	fclose(f);
+	free(out.data);
 
-	char *link = NULL;
 	if (rc != CURLE_OK) {
 		snprintf(err, errlen, T("Red: %s"), curl_easy_strerror(rc));
-	} else {
-		const char *d = mj_get(out.data, "data");
-		char *l = mj_str(mj_get(d, "link"));
-		if (l && code < 300) {
-			link = l;
-		} else {
-			free(l);
-			const char *e = mj_get(d, "error");
-			char *em = mj_str(e);
-			if (!em)
-				em = mj_str(mj_get(e, "message"));
-			snprintf(err, errlen, "Imgur %ld: %.120s", code, em ? em : T("error desconocido"));
-			free(em);
-		}
+		return NULL;
 	}
-	free(out.data);
+	if (code == 401 || code == 403) {
+		snprintf(err, errlen, T("FILEHOST: usuario o contraseña incorrectos"));
+		return NULL;
+	}
+	if (code == 413) {
+		snprintf(err, errlen, T("FILEHOST: la imagen es demasiado grande para el servidor"));
+		return NULL;
+	}
+	if (code >= 300 || !fh_location[0]) {
+		snprintf(err, errlen, "FILEHOST HTTP %ld", code);
+		return NULL;
+	}
+	char link[400];
+	if (!strncmp(fh_location, "http://", 7) || !strncmp(fh_location, "https://", 8))
+		str_copy(link, fh_location, sizeof(link));
+	else if (fh_location[0] == '/')
+		snprintf(link, sizeof(link), "%s%s", origin, fh_location);
+	else
+		snprintf(link, sizeof(link), "%s/%s", url, fh_location);
+	return str_dup(link);
+}
+
+static void uploads_log(int host, const char *link, const char *del)
+{
+	FILE *f = fopen(UPLOADS_PATH, "a");
+	if (!f)
+		return;
+	char d[12], hm[6];
+	today(d);
+	time_hhmm(hm);
+	fprintf(f, "%s %s\t%s\t%s\t%s\n", d, hm, img_host_name(host), link, del ? del : "");
+	fclose(f);
+}
+
+static char *img_upload(int sidx, const char *path, char *err, int errlen)
+{
+	pthread_mutex_lock(&g_lock);
+	int host = g_cfg.img_host;
+	pthread_mutex_unlock(&g_lock);
+	long size = file_size(path);
+	long max = host == IMG_IMGUR ? 10 : host == IMG_IMGBB ? 32 : 200;
+	if (size <= 0) {
+		snprintf(err, errlen, T("No se pudo abrir el archivo"));
+		return NULL;
+	}
+	if (size > max * 1024 * 1024) {
+		snprintf(err, errlen, T("%s acepta imágenes de hasta %ld MB"), img_host_name(host), max);
+		return NULL;
+	}
+	str_copy(up_host, img_host_name(host), sizeof(up_host));
+	char *del = NULL, *link;
+	switch (host) {
+	case IMG_IMGUR:    link = imgur_upload(path, err, errlen); break;
+	case IMG_IMGBB:    link = imgbb_upload(path, &del, err, errlen); break;
+	case IMG_FILEHOST: link = filehost_upload(sidx, path, err, errlen); break;
+	default:           link = litterbox_upload(path, err, errlen); break;
+	}
+	if (link)
+		uploads_log(host, link, del);
+	free(del);
 	return link;
+}
+
+/* ---------------- updates ---------------- */
+
+static int ver_cmp(const char *a, const char *b)
+{
+	for (int i = 0; i < 4; i++) {
+		while (*a && !isdigit((unsigned char)*a)) a++;
+		while (*b && !isdigit((unsigned char)*b)) b++;
+		long x = 0, y = 0;
+		while (isdigit((unsigned char)*a)) x = x * 10 + (*a++ - '0');
+		while (isdigit((unsigned char)*b)) y = y * 10 + (*b++ - '0');
+		if (x != y)
+			return x < y ? -1 : 1;
+	}
+	return 0;
+}
+
+static void run_update(int manual)
+{
+	char repo[80], err[120] = "";
+	pthread_mutex_lock(&g_lock);
+	str_copy(repo, g_cfg.update_repo, sizeof(repo));
+	pthread_mutex_unlock(&g_lock);
+	int result = -1;
+	char tag[32] = "", link[200] = "";
+	if (!repo[0] || !strncmp(repo, "YOUR_", 5) || !strchr(repo, '/')) {
+		snprintf(err, sizeof(err), T("Repositorio de actualizaciones sin configurar"));
+	} else {
+		char url[200];
+		snprintf(url, sizeof(url), "https://api.github.com/repos/%s/releases/latest", repo);
+		Buf out = {0};
+		CURL *c = http_new(&out, 20);
+		struct curl_slist *hdr = curl_slist_append(NULL, "Accept: application/vnd.github+json");
+		curl_easy_setopt(c, CURLOPT_URL, url);
+		curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
+		CURLcode rc = curl_easy_perform(c);
+		long code = 0;
+		curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+		curl_easy_cleanup(c);
+		curl_slist_free_all(hdr);
+		char *t = (rc == CURLE_OK && code == 200) ? mj_str(mj_get(out.data, "tag_name")) : NULL;
+		char *h = t ? mj_str(mj_get(out.data, "html_url")) : NULL;
+		if (rc != CURLE_OK)
+			snprintf(err, sizeof(err), T("Red: %s"), curl_easy_strerror(rc));
+		else if (code == 404)
+			snprintf(err, sizeof(err), T("Todavía no hay versiones publicadas"));
+		else if (!t)
+			snprintf(err, sizeof(err), "GitHub HTTP %ld", code);
+		else {
+			str_copy(tag, t, sizeof(tag));
+			str_copy(link, h ? h : "", sizeof(link));
+			result = ver_cmp(t, APP_VERSION) > 0 ? 1 : 2;
+		}
+		free(t);
+		free(h);
+		free(out.data);
+	}
+	pthread_mutex_lock(&g_lock);
+	if (result > 0) {
+		today(g_cfg.update_last);
+		config_save();
+	}
+	if (result == 1 || manual) {
+		g_update_done = result;
+		str_copy(g_update_tag, tag, sizeof(g_update_tag));
+		str_copy(g_update_url, link, sizeof(g_update_url));
+		str_copy(g_update_err, err, sizeof(g_update_err));
+		g_dirty = 1;
+	}
+	pthread_mutex_unlock(&g_lock);
 }
 
 static unsigned char *http_get(const char *url, size_t *len, char *err, int errlen)
@@ -493,7 +973,7 @@ static void run_job(Job *j)
 			return;
 		}
 		set_busy(T("Traduciendo..."));
-		char *r = openai_translate(j->text, j->lang, 0, err, sizeof(err));
+		char *r = translate(j->text, j->lang, 0, err, sizeof(err));
 		if (r) {
 			tcache_put(j->lang, j->text, r);
 			finish_in(j, r);
@@ -506,7 +986,7 @@ static void run_job(Job *j)
 		}
 	} else if (j->type == JOB_TR_OUT) {
 		set_busy(T("Traduciendo mensaje..."));
-		char *r = openai_translate(j->text, j->lang, 1, err, sizeof(err));
+		char *r = translate(j->text, j->lang, 1, err, sizeof(err));
 		if (r && r[0]) {
 			irc_send_privmsg(j->sidx, j->uid, r);
 		} else {
@@ -529,8 +1009,8 @@ static void run_job(Job *j)
 		g_dirty = 1;
 		pthread_mutex_unlock(&g_lock);
 	} else if (j->type == JOB_UPLOAD) {
-		set_busy(T("Subiendo imagen a Imgur..."));
-		char *link = imgur_upload(j->text, err, sizeof(err));
+		set_busy(T("Subiendo imagen..."));
+		char *link = img_upload(j->sidx, j->text, err, sizeof(err));
 		pthread_mutex_lock(&g_lock);
 		g_upload_sidx = j->sidx;
 		g_upload_uid = j->uid;
@@ -544,6 +1024,9 @@ static void run_job(Job *j)
 		g_dirty = 1;
 		pthread_mutex_unlock(&g_lock);
 		free(link);
+	} else if (j->type == JOB_UPDATE) {
+		set_busy(T("Buscando actualizaciones..."));
+		run_update(j->mid);
 	}
 	set_busy("");
 }
@@ -631,6 +1114,18 @@ void tr_request_one(int sidx, uint32_t uid, uint32_t mid, const char *text, cons
 		free(j.text);
 	}
 	pthread_mutex_unlock(&qlock);
+}
+
+void update_check_request(int manual)
+{
+	if (!manual) {
+		char d[12];
+		today(d);
+		if (!g_cfg.update_check || !strcmp(d, g_cfg.update_last))
+			return;
+	}
+	Job j = { JOB_UPDATE, 0, 0, manual, str_dup(""), {0} };
+	push_job(&j);
 }
 
 void img_upload_request(int sidx, uint32_t uid, const char *path)

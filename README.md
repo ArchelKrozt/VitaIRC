@@ -6,7 +6,7 @@
 
 <p align="center">
   A native, lightweight IRC client for the PlayStation Vita<br>
-  with <b>ChatGPT translation</b>, <b>Imgur uploads</b>, an image viewer and bouncer support.
+  with <b>free translation</b>, <b>image uploads</b>, <b>emoji and reactions</b>, an image viewer and bouncer support.
 </p>
 
 <p align="center">
@@ -36,8 +36,8 @@ something back to the Vita scene, and it is fully open source.
 - [Getting started](#getting-started)
 - [Controls](#controls)
 - [Commands](#commands)
-- [Translation with ChatGPT](#translation-with-chatgpt)
-- [Images: Imgur, camera and viewer](#images-imgur-camera-and-viewer)
+- [Translation](#translation)
+- [Images: uploads, camera and viewer](#images-uploads-camera-and-viewer)
 - [Logging in to Libera.Chat (SASL)](#logging-in-to-liberachat-sasl)
 - [Never miss a message: bouncers](#never-miss-a-message-bouncers)
 - [Configuration file](#configuration-file)
@@ -57,9 +57,13 @@ something back to the Vita scene, and it is fully open source.
 - **Automatic login**: SASL PLAIN, NickServ or server password. With a password set, VitaIRC
   identifies by itself and **takes your nick back** if a previous session is still holding it.
 - Channels, private messages, user lists with op/voice prefixes and away status.
-- IRCv3: `server-time`, `multi-prefix`, `away-notify`, perfect for bouncers.
+- IRCv3: `server-time`, `multi-prefix`, `away-notify`, `batch`, `message-tags` and **`draft/chathistory`**:
+  with a bouncer such as soju you get what you missed when you connect, and **scrolling past the top
+  loads older messages** from the server.
+- **Reactions** (`+draft/react`): tap a message → *React...* (👍 ❤️ 😂 😮 😢 🙏 🔥 🎉 👀 ✅), shown under it.
 - **mIRC colors, bold and underline** rendered on screen (can be turned off).
 - **Highlight words** besides your nick, unread counters, pop-up notifications and an optional **chime**.
+- **Mute** a channel (no sound or pop-ups) from its menu.
 - **Ignore list** with wildcards and private-message **flood protection**.
 - **Operator tools** from the user list: op/deop, voice/devoice, kick, ban.
 - `/away`, invitations with a *"Join?"* prompt, channel browser (`/list`).
@@ -68,21 +72,29 @@ something back to the Vita scene, and it is fully open source.
 
 **Comfort**
 - **Persistent history**: every channel and query is logged to the memory card, and your windows
-  come back with their last messages when you reopen the app.
+  come back with their last messages when you reopen the app. **Day separators** (*Today*,
+  *Yesterday*, *Thu 08/10/2026*) between days.
+- **Emoji**: a monochrome emoji font (Noto Emoji) fills in what the system font lacks.
+- **Nick completion**: type `@` and the start of a nick, confirm, and VitaIRC completes it (or lets
+  you pick when several match).
+- **Offline queue**: messages written while disconnected are shown dimmed and sent after reconnecting.
 - **Quick replies** (back button): reply to whoever spoke recently or resend something you wrote.
   Unsent text is kept as a draft.
 - **Tap any message** to reply, open a query, translate it, ignore the sender or open its links.
 - Touch screen and physical buttons everywhere; respects the console's ✕/○ confirm setting.
 - Interface in **English and Spanish** (follows the system language, or pick one in Settings).
 - Power friendly: redraws only when something changes, configurable CPU clock (222/333/444 MHz).
+- **Update notice**: checks GitHub Releases once a day and tells you when a new version is out.
 
-**ChatGPT, Imgur and images**
+**Translation and images**
 - Per-channel **translation of incoming messages** (shown under each line) and of **your own messages**
   before sending them. Each channel can use its own language.
-- Translations are **cached on the memory card**, so the same sentence is never paid for twice,
-  and Settings shows your **OpenAI token usage**.
-- **Upload pictures to Imgur** from `ux0:picture/` with a preview first, or **take a photo with the
-  Vita's camera** and upload it, all from the chat.
+- **Free translation** with Google out of the box, or **ChatGPT** with your own OpenAI API key.
+- Translations are **cached on the memory card**, and Settings shows your **OpenAI token usage**.
+- **Upload pictures** from `ux0:picture/` with a preview first, or **take a photo with the Vita's
+  camera** and upload it, all from the chat. Services: **Litterbox** (no account needed),
+  **ImgBB**, **Imgur** or **your own soju bouncer** (`soju.im/FILEHOST`).
+- **My recent uploads**: resend a link, or delete an ImgBB image.
 - **Built-in image viewer** (PNG/JPG, zoom and pan) for image and Imgur links; other links open in
   the Vita browser.
 
@@ -122,14 +134,14 @@ using a random `VitaNNNN` nick, and connects automatically.
 
 | Button | Action |
 |---|---|
-| ✕ (○ on Japanese consoles) | Write a message or command (on-screen keyboard) |
+| ✕ (○ on Japanese consoles) | Write a message or command (on-screen keyboard); `@ab` + confirm completes a nick |
 | ○ (✕ on Japanese consoles) | Quick replies, or back to the newest messages when scrolled |
 | △ / START | Menu |
 | □ | Toggle translation of incoming messages in this channel |
 | L / R, ← / → | Previous / next window |
-| ↑ / ↓, swipe | Scroll |
+| ↑ / ↓, swipe | Scroll (past the top: older messages from the server) |
 | SELECT | Servers |
-| Tap a message | Reply, PM, translate, ignore, open links / images |
+| Tap a message | Reply, PM, react, translate, ignore, open links / images |
 | Tap the sidebar | Open that channel |
 | Tap the bottom bar | Write |
 
@@ -158,30 +170,38 @@ In the user list, **✕** opens the user's options, **□** runs WHOIS and **△
 
 Any other `/COMMAND` is sent to the server as-is.
 
-## Translation with ChatGPT
+## Translation
 
-1. Create an API key at [platform.openai.com](https://platform.openai.com/api-keys).
-2. On the Vita: **△ → Settings → OpenAI API key**, and choose your languages.
-3. In a channel press **□** (or **△ → Translation...**):
-   - **Incoming**: each message gets its translation underneath (`» ...`).
-   - **My messages**: type in your language and VitaIRC sends the translation.
-   - **This channel's language**: override the global language for this channel only.
+Translation works out of the box with **Google (free)**: no account or key. To use **ChatGPT**
+instead, create an API key at [platform.openai.com](https://platform.openai.com/api-keys) and set
+**△ → Settings → Translator → ChatGPT** and **OpenAI API key**.
 
-The default model is `gpt-4o-mini` (cheap and fast); change it in Settings if you like. Short
-messages, links and commands are skipped, results are cached on the memory card, and
-**Settings → OpenAI usage** shows the tokens spent today and in total.
+In a channel press **□** (or **△ → Translation...**):
+- **Incoming**: each message gets its translation underneath (`» ...`).
+- **My messages**: type in your language and VitaIRC sends the translation.
+- **This channel's language**: override the global language for this channel only.
 
-> Messages you choose to translate are sent to OpenAI. Leave translation off in channels where
-> that is not acceptable.
+Short messages, links and commands are skipped and results are cached on the memory card. With
+ChatGPT the default model is `gpt-4o-mini`, and **Settings → OpenAI usage** shows the tokens spent.
 
-## Images: Imgur, camera and viewer
+> Messages you choose to translate are sent to Google or OpenAI. Leave translation off in channels
+> where that is not acceptable. The free Google service may slow you down if you translate a lot.
 
-- **Imgur Client-ID**: register an application at
-  [api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient) choosing
-  *"Anonymous usage without user authorization"*, and paste the Client-ID in **Settings**.
-- **Upload**: **△ → Images... → Upload image to Imgur**, pick a file (Vita screenshots live in
+## Images: uploads, camera and viewer
+
+Pick the service in **△ → Settings → Image service**:
+
+| Service | Setup | Notes |
+|---|---|---|
+| **Litterbox** (default) | none | Temporary: 1, 12, 24 or 72 hours (*Images are deleted after*) |
+| **ImgBB** | free API key from [api.imgbb.com](https://api.imgbb.com/) → *ImgBB API key* | Never expires, or 1 hour to 1 month. *My recent uploads* can delete them |
+| **Imgur** | Client-ID from [api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient) (*anonymous usage*) | |
+| **soju FILEHOST** | your soju bouncer with `file-upload` (soju 0.8+) | Your own server; uses the bouncer's login. See [docs/soju-filehost.md](docs/soju-filehost.md) |
+
+- **Upload**: **△ → Images... → Upload image**, pick a file (Vita screenshots live in
   `ux0:picture/SCREENSHOT`), check the preview and press ✕. The link opens in the keyboard so you
   can add a comment before sending.
+- **My recent uploads**: the last links, to send again (and the delete link for ImgBB).
 - **Camera**: **△ → Images... → Take a photo and upload it**. □ switches between the front and back
   cameras. Photos are saved to `ux0:data/VitaIRC/photos/`.
 - **Viewer**: tap a message with an image link (or use **Channel links and images**). PNG and JPG
@@ -217,8 +237,10 @@ stay online 24/7. The proper fix is a **bouncer** (soju or ZNC) on any always-on
 | **soju** | SASL PLAIN | `user/network@vita` | your soju password |
 | **ZNC** | Server PASS | — | `user/network:password` |
 
-When you connect, the bouncer replays what you missed, and thanks to IRCv3 `server-time` every
-message keeps its real timestamp.
+When you connect, VitaIRC asks the bouncer (IRCv3 `chathistory`) for what you missed in every
+channel and private chat, with each message's real time, and scrolling past the top of a window
+loads older messages. With soju 0.8+ you can also upload images to the bouncer itself
+(**soju FILEHOST**, see [docs/soju-filehost.md](docs/soju-filehost.md)).
 
 ## Configuration file
 
@@ -226,11 +248,17 @@ Everything can be changed from the app, or by editing `ux0:data/VitaIRC/config.i
 
 ```ini
 [general]
+translator=0             ; 0 Google (free), 1 ChatGPT
 openai_key=sk-...
 openai_model=gpt-4o-mini
 lang_in=en               ; translate incoming messages to this language
 lang_out=es              ; translate my messages to this language
+image_host=0             ; 0 Litterbox, 1 ImgBB, 2 soju FILEHOST, 3 Imgur
 imgur_client_id=xxxxxxxxxxxxxxx
+imgbb_key=
+imgbb_expire=0           ; 0 never, 1 1h, 2 1 day, 3 1 week, 4 1 month
+litterbox_time=3         ; 0 1h, 1 12h, 2 24h, 3 72h
+update_check=1           ; look for a new release once a day
 show_joins=1
 keep_awake=1
 cpu_mhz=333              ; 222 / 333 / 444
@@ -268,7 +296,8 @@ your servers, channels, settings and history in `ux0:data/VitaIRC/` are kept.
 |---|---|
 | `ux0:data/VitaIRC/config.ini` | Settings and servers |
 | `ux0:data/VitaIRC/logs/<server>/<channel>.log` | Chat history (plain text, trimmed automatically at 512 KB) |
-| `ux0:data/VitaIRC/session.txt` | Open windows and their translation settings |
+| `ux0:data/VitaIRC/session.txt` | Open windows, their translation settings and mute |
+| `ux0:data/VitaIRC/uploads.txt` | Your uploaded image links (and ImgBB delete links) |
 | `ux0:data/VitaIRC/trcache.txt` | Translation cache |
 | `ux0:data/VitaIRC/usage.txt` | OpenAI token counters |
 | `ux0:data/VitaIRC/photos/` | Photos taken with the camera |
@@ -281,8 +310,9 @@ your servers, channels, settings and history in `ux0:data/VitaIRC/` are kept.
   *"Stay awake while connected"* on, VitaIRC prevents auto-sleep while a server is connected
   (the screen may still dim), and it reconnects by itself after resuming. Use a bouncer to keep
   everything you miss.
-- The system font has no emoji; some symbols may show as boxes.
-- GIF images open in the browser instead of the built-in viewer.
+- Emoji are drawn in one colour (the text's), and combined emoji (flags, families) show as their parts.
+- GIF and WebP images open in the browser instead of the built-in viewer.
+- Reactions need a server with IRCv3 `message-tags` (soju, Ergo...); Libera.Chat does not offer it.
 
 ## Building from source
 
@@ -290,15 +320,18 @@ Requirements: [VitaSDK](https://vitasdk.org) and CMake.
 
 ```sh
 # install VitaSDK (see vitasdk.org), then the libraries:
-vdpm install libvita2d curl-mbedtls mbedtls zlib libpng
+vdpm install libvita2d freetype curl-mbedtls mbedtls zlib libpng
 
 export VITASDK=/usr/local/vitasdk   # or wherever you installed it
-git clone https://github.com/YOUR_USERNAME/VitaIRC.git
+git clone https://github.com/ArchelKrozt/VitaIRC.git
 cd VitaIRC
 ./build.sh                           # -> dist/VitaIRC.vpk
 ```
 
 `vita-pack-vpk` doesn't handle spaces in paths; `build.sh` works around that automatically.
+
+**Update notice**: set `UPDATE_REPO` in [`src/config.h`](src/config.h) to your `owner/repo` so the app
+checks your GitHub Releases.
 
 **GitHub Actions**: [`.github/workflows/build.yml`](.github/workflows/build.yml) builds the VPK on
 every push and uploads it as an artifact. Pushing a tag like `v1.0` publishes a release with the
@@ -311,7 +344,7 @@ VPK attached.
 | `src/main.c` | UI (vita2d), input, on-screen keyboard, screens and menus |
 | `src/irc.c` | IRC protocol, one thread per server, channels, users, commands |
 | `src/conn.c` | Sockets + TLS (mbedTLS) |
-| `src/net.c` | HTTP worker: OpenAI translation, Imgur uploads, image downloads (libcurl) |
+| `src/net.c` | HTTP worker: translation (Google / OpenAI), image uploads (Litterbox, ImgBB, Imgur, soju FILEHOST), downloads, update check (libcurl) |
 | `src/history.c` | Chat logs and open-window session |
 | `src/config.c` | `config.ini` reading and writing |
 | `src/i18n.c` | English strings (generated by `tools/i18n_gen.py`) |
@@ -320,6 +353,7 @@ VPK attached.
 | `src/minijson.c` | Minimal JSON reader |
 | `sce_sys/` | Icon and LiveArea assets |
 | `res/cacert.pem` | CA certificates used to verify TLS connections |
+| `res/NotoEmoji.ttf` | Monochrome emoji font ([SIL OFL 1.1](res/NotoEmoji-OFL.txt)) |
 
 ## Development tools
 
@@ -340,7 +374,9 @@ VPK attached.
 
 - [VitaSDK](https://vitasdk.org) and the people behind [HENkaku](https://henkaku.xyz) / Ensō.
 - [vita2d](https://github.com/xerpi/libvita2d), [mbedTLS](https://www.trustedfirmware.org/projects/mbed-tls/),
-  [libcurl](https://curl.se), [libjpeg-turbo](https://libjpeg-turbo.org), [zlib](https://zlib.net), [libpng](http://www.libpng.org).
+  [libcurl](https://curl.se), [libjpeg-turbo](https://libjpeg-turbo.org), [zlib](https://zlib.net), [libpng](http://www.libpng.org),
+  [FreeType](https://freetype.org).
+- [Noto Emoji](https://github.com/google/fonts/tree/main/ofl/notoemoji) by Google, under the SIL Open Font License 1.1.
 - [Vita3K](https://vita3k.org), used to test the interface.
 
 ## License

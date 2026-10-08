@@ -6,7 +6,7 @@
 
 <p align="center">
   Cliente IRC nativo y ligero para PlayStation Vita<br>
-  con <b>traducción por ChatGPT</b>, <b>subida a Imgur</b>, visor de imágenes y soporte de bouncers.
+  con <b>traducción gratis</b>, <b>subida de imágenes</b>, <b>emoji y reacciones</b>, visor de imágenes y soporte de bouncers.
 </p>
 
 <p align="center">
@@ -29,7 +29,16 @@ a la escena de la Vita y es de código abierto.
 - **Identificación automática** (SASL, NickServ o PASS de servidor): si pusiste contraseña, se identifica
   sola y **recupera tu nick** si una sesión anterior lo dejó ocupado.
 - Canales, privados, lista de usuarios con prefijos y estado ausente.
-- IRCv3 (`server-time`, `multi-prefix`, `away-notify`), ideal para usar con bouncers.
+- IRCv3 (`server-time`, `multi-prefix`, `away-notify`, `batch`, `message-tags` y **`draft/chathistory`**):
+  con un bouncer como soju recibes lo que te perdiste al conectar, y **al subir más allá del inicio
+  se cargan mensajes anteriores** desde el servidor.
+- **Reacciones** (`+draft/react`): toca un mensaje → *Reaccionar...*; se muestran debajo del mensaje.
+- **Emoji** con una fuente monocroma (Noto Emoji) donde la del sistema no llega.
+- **Separadores de fecha** (*Hoy*, *Ayer*, *jue 08/10/2026*) entre días.
+- **Completar nicks**: escribe `@` y el comienzo de un nick, confirma, y VitaIRC lo completa.
+- **Silenciar** un canal (sin sonido ni avisos).
+- **Cola sin conexión**: lo que escribes desconectado se muestra atenuado y se envía al reconectar.
+- **Aviso de versión nueva** (consulta GitHub Releases una vez al día).
 - **Colores, negritas y subrayado de IRC**, **palabras de alerta**, avisos y **sonido** en privados y menciones.
 - **Ignorar usuarios** (con comodines) y **protección contra flood** de privados.
 - **Herramientas de operador** desde la lista de usuarios: op, voz, kick y ban.
@@ -39,9 +48,10 @@ a la escena de la Vita y es de código abierto.
 - **Historial guardado** en la tarjeta de memoria: al reabrir vuelven tus canales y sus mensajes.
 - **Respuestas rápidas** (botón volver) y **borradores**.
 - **Toca un mensaje** para responder, abrir un privado, traducirlo, ignorar o abrir sus enlaces.
-- **Traducción con ChatGPT** de mensajes recibidos y propios, con idioma por canal, caché en la
-  tarjeta y contador de uso de la API.
-- **Imgur**: sube imágenes con vista previa o **saca una foto con la cámara** de la Vita.
+- **Traducción gratis con Google** (sin cuenta) o **con ChatGPT** (tu API key), de mensajes recibidos
+  y propios, con idioma por canal y caché en la tarjeta.
+- **Sube imágenes** con vista previa o **saca una foto con la cámara** de la Vita: **Litterbox** (sin
+  cuenta), **ImgBB**, **Imgur** o **tu propio soju** (FILEHOST). *Mis subidas recientes* guarda los enlaces.
 - **Visor de imágenes** integrado (PNG/JPG con zoom); el resto de enlaces se abre en el navegador.
 - Interfaz en **español e inglés**, controles físicos y pantalla táctil.
 
@@ -62,19 +72,23 @@ a la escena de la Vita y es de código abierto.
 | L / R, ← / → | Cambiar de ventana |
 | ↑ / ↓, deslizar | Desplazar |
 | SELECT | Servidores |
-| Tocar un mensaje | Responder, privado, traducir, ignorar, abrir enlaces |
+| Tocar un mensaje | Responder, privado, reaccionar, traducir, ignorar, abrir enlaces |
 
 Escribe `/help` para ver todos los comandos (`/join`, `/msg`, `/away`, `/ignore`, `/kick`, `/ban`...).
 
 ## Configuración rápida
 
-- **ChatGPT**: crea una API key en [platform.openai.com](https://platform.openai.com/api-keys) y ponla en △ → Ajustes.
-- **Imgur**: registra una app en [api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient)
-  (*uso anónimo*) y copia el Client-ID en Ajustes.
+- **Traducción**: funciona sin configurar nada (Google). Para ChatGPT: △ → Ajustes → *Traductor*, y
+  pon tu API key de [platform.openai.com](https://platform.openai.com/api-keys).
+- **Imágenes**: △ → Ajustes → *Servicio de imágenes*. Litterbox no necesita nada; ImgBB necesita una
+  API key gratis de [api.imgbb.com](https://api.imgbb.com/); Imgur un Client-ID de
+  [api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient) (*uso anónimo*); soju
+  FILEHOST, un soju 0.8+ con `file-upload` ([guía](docs/soju-filehost.md)).
 - **Cuenta de Libera.Chat**: en Servidores → Libera.Chat, completa Nick, Cuenta y Contraseña, con
   autenticación **SASL PLAIN** o **Automática**. Al conectar verás "Autenticación SASL correcta".
 - **Bouncer (soju/ZNC)**: agrégalo como un servidor más. soju: SASL con cuenta `usuario/red@vita`;
   ZNC: PASS de servidor `usuario/red:contraseña`. Así no pierdes mensajes aunque la Vita esté apagada.
+  Con soju, VitaIRC pide el historial por `chathistory` (necesita `message-store db` en soju).
 
 Todo se guarda en `ux0:data/VitaIRC/` (`config.ini`, `logs/`, `photos/`...). Las claves y contraseñas
 se guardan en texto plano.
@@ -93,7 +107,7 @@ mientras está abierta, y al volver de la suspensión se reconecta sola. Para no
 ## Compilar
 
 ```sh
-vdpm install libvita2d curl-mbedtls mbedtls zlib libpng
+vdpm install libvita2d freetype curl-mbedtls mbedtls zlib libpng
 export VITASDK=/usr/local/vitasdk
 ./build.sh        # deja dist/VitaIRC.vpk
 ```

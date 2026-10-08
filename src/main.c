@@ -1,6 +1,6 @@
 /*
  * VitaIRC - IRC client for PlayStation Vita
- * Native, standalone IRC client with ChatGPT translation and Imgur uploads.
+ * Native, standalone IRC client with translation, image uploads and IRCv3 extras.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +25,8 @@
 #include <psp2/rtc.h>
 #include <vita2d.h>
 #include <psp2/display.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 #include "config.h"
 #include "irc.h"
@@ -90,6 +92,126 @@ static int   lh = 21;      /* line height */
 static int   asc = 16;     /* baseline offset from line top */
 static float cw_cache[0x3000];
 
+/* Emoji: the system font has none, so a monochrome emoji font (Noto Emoji)
+ * draws them, tinted like the surrounding text. FreeType renders the glyphs
+ * into one texture atlas (vita2d's own font code only handles UCS-2, which
+ * leaves out most emoji). */
+#define EMOJI_FONT "app0:emoji.ttf"
+#define ATLAS_W    512
+#define ATLAS_H    512
+#define EG_SLOTS   1024
+typedef struct { uint32_t cp; int16_t x, y; uint8_t w, h, adv, ok; int8_t left, top; } EGlyph;
+static FT_Library      ft_lib;
+static FT_Face         ft_face;
+static vita2d_texture *eatlas;
+static int             at_x, at_y, at_row_h;   /* shelf packing in the atlas */
+static EGlyph          eglyphs[EG_SLOTS];
+static int             esize = 15;
+static uint8_t         emo_known[0x1FB00 / 4];   /* 2 bits per code point: 0 unknown, 1 yes, 2 no */
+static struct { uint32_t cp; float w; } wc_hi[256];
+
+static void emoji_init(void)
+{
+	if (FT_Init_FreeType(&ft_lib) != 0)
+		return;
+	if (FT_New_Face(ft_lib, EMOJI_FONT, 0, &ft_face) != 0) {
+		ft_face = NULL;
+		return;
+	}
+	eatlas = vita2d_create_empty_texture_format(ATLAS_W, ATLAS_H, SCE_GXM_TEXTURE_FORMAT_U8_R111);
+	if (!eatlas) {
+		FT_Done_Face(ft_face);
+		ft_face = NULL;
+	}
+}
+
+/* New text size: start the atlas over. */
+static void emoji_reset(void)
+{
+	if (!ft_face)
+		return;
+	vita2d_wait_rendering_done();
+	memset(eglyphs, 0, sizeof(eglyphs));
+	at_x = at_y = at_row_h = 0;
+	memset(vita2d_texture_get_datap(eatlas), 0, vita2d_texture_get_stride(eatlas) * ATLAS_H);
+	FT_Set_Pixel_Sizes(ft_face, 0, esize);
+}
+
+static EGlyph *emoji_glyph(uint32_t cp)
+{
+	unsigned h = (cp * 2654435761u) >> 22;
+	for (int i = 0; i < EG_SLOTS; i++) {
+		EGlyph *g = &eglyphs[(h + i) & (EG_SLOTS - 1)];
+		if (g->cp == cp)
+			return g;
+		if (g->cp)
+			continue;
+		g->cp = cp;
+		if (FT_Load_Char(ft_face, cp, FT_LOAD_RENDER) != 0)
+			return g;
+		FT_GlyphSlot sl = ft_face->glyph;
+		int w = sl->bitmap.width, rows = sl->bitmap.rows;
+		g->adv = sl->advance.x >> 6;
+		if (w > 0 && rows > 0 && w < 128 && rows < 128 && sl->bitmap.pitch > 0) {
+			if (at_x + w + 1 > ATLAS_W) {
+				at_x = 0;
+				at_y += at_row_h + 1;
+				at_row_h = 0;
+			}
+			if (at_y + rows > ATLAS_H)
+				return g;              /* atlas full: keeps its width, draws nothing */
+			uint8_t *dst = vita2d_texture_get_datap(eatlas);
+			int stride = vita2d_texture_get_stride(eatlas);
+			for (int r = 0; r < rows; r++)
+				memcpy(dst + (at_y + r) * stride + at_x, sl->bitmap.buffer + r * sl->bitmap.pitch, w);
+			g->x = at_x;
+			g->y = at_y;
+			g->w = w;
+			g->h = rows;
+			g->left = sl->bitmap_left;
+			g->top = sl->bitmap_top;
+			at_x += w + 1;
+			if (rows > at_row_h)
+				at_row_h = rows;
+			g->ok = 1;
+		}
+		return g;
+	}
+	return NULL;
+}
+
+/* Joiners, variation selectors, skin tones and tags: drawn as nothing. */
+static int cp_invisible(uint32_t cp)
+{
+	return cp == 0x200D || (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0x1F3FB && cp <= 0x1F3FF) ||
+	       (cp >= 0xE0020 && cp <= 0xE007F) || cp == 0x20E3;
+}
+
+static int cp_emoji(uint32_t cp)
+{
+	if (!ft_face)
+		return 0;
+	if (!((cp >= 0x1F000 && cp < 0x1FB00) || (cp >= 0x2300 && cp < 0x2400) || (cp >= 0x2600 && cp < 0x2800) ||
+	      (cp >= 0x2B00 && cp < 0x2C00)))
+		return 0;
+	int sh = (cp & 3) * 2;
+	int v = (emo_known[cp >> 2] >> sh) & 3;
+	if (!v) {
+		v = FT_Get_Char_Index(ft_face, cp) ? 1 : 2;
+		emo_known[cp >> 2] |= v << sh;
+	}
+	return v == 1;
+}
+
+static int utf8_put(uint32_t cp, char *b)
+{
+	if (cp < 0x80) { b[0] = cp; return 1; }
+	if (cp < 0x800) { b[0] = 0xC0 | (cp >> 6); b[1] = 0x80 | (cp & 0x3F); return 2; }
+	if (cp < 0x10000) { b[0] = 0xE0 | (cp >> 12); b[1] = 0x80 | ((cp >> 6) & 0x3F); b[2] = 0x80 | (cp & 0x3F); return 3; }
+	b[0] = 0xF0 | (cp >> 18); b[1] = 0x80 | ((cp >> 12) & 0x3F); b[2] = 0x80 | ((cp >> 6) & 0x3F); b[3] = 0x80 | (cp & 0x3F);
+	return 4;
+}
+
 static void font_setup(void)
 {
 	fscale = 0.9f * g_cfg.font_pct / 100.0f;
@@ -98,30 +220,45 @@ static void font_setup(void)
 		h = (int)(18 * fscale);
 	lh = h + 5;
 	asc = (int)(h * 0.78f) + 2;
+	esize = asc + 1;
 	memset(cw_cache, 0, sizeof(cw_cache));
+	memset(wc_hi, 0, sizeof(wc_hi));
+	emoji_reset();
 }
 
 static float char_width(uint32_t cp)
 {
 	if (cp < 0x3000 && cw_cache[cp] > 0)
 		return cw_cache[cp];
+	if (cp >= 0x3000) {
+		unsigned slot = (cp * 2654435761u) >> 24;
+		if (wc_hi[slot].cp == cp)
+			return wc_hi[slot].w;
+	}
 	float w;
-	if (cp == ' ') {
+	if (cp_invisible(cp)) {
+		w = 0.001f;              /* > 0 so the cache keeps it */
+	} else if (cp_emoji(cp)) {
+		EGlyph *g = emoji_glyph(cp);
+		w = g && g->adv ? g->adv + 1 : esize;
+	} else if (cp == ' ') {
 		w = vita2d_pgf_text_width(font, fscale, "a a") - vita2d_pgf_text_width(font, fscale, "aa");
 		if (w <= 0)
 			w = 5 * fscale;
 	} else {
 		char b[5] = {0};
-		if (cp < 0x80) b[0] = cp;
-		else if (cp < 0x800) { b[0] = 0xC0 | (cp >> 6); b[1] = 0x80 | (cp & 0x3F); }
-		else if (cp < 0x10000) { b[0] = 0xE0 | (cp >> 12); b[1] = 0x80 | ((cp >> 6) & 0x3F); b[2] = 0x80 | (cp & 0x3F); }
-		else { b[0] = 0xF0 | (cp >> 18); b[1] = 0x80 | ((cp >> 12) & 0x3F); b[2] = 0x80 | ((cp >> 6) & 0x3F); b[3] = 0x80 | (cp & 0x3F); }
+		utf8_put(cp, b);
 		w = vita2d_pgf_text_width(font, fscale, b);
 		if (w <= 0)
 			w = 8 * fscale;
 	}
-	if (cp < 0x3000)
+	if (cp < 0x3000) {
 		cw_cache[cp] = w;
+	} else {
+		unsigned slot = (cp * 2654435761u) >> 24;
+		wc_hi[slot].cp = cp;
+		wc_hi[slot].w = w;
+	}
 	return w;
 }
 
@@ -138,7 +275,43 @@ static int text_w(const char *s)
 
 static void draw_text(int x, int top, unsigned int color, const char *s)
 {
-	vita2d_pgf_draw_text(font, x, top + asc, color, fscale, s);
+	/* fast path: no byte that could start a symbol/emoji sequence */
+	const unsigned char *u = (const unsigned char *)s;
+	while (*u && *u != 0xE2 && *u != 0xEF && *u < 0xF0)
+		u++;
+	if (!*u) {
+		vita2d_pgf_draw_text(font, x, top + asc, color, fscale, s);
+		return;
+	}
+	char run[1100];
+	int rn = 0;
+	float fx = x;
+	const char *p = s;
+	while (1) {
+		uint32_t cp = 0;
+		int len = *p ? utf8_decode(p, &cp) : 0;
+		int special = len && (cp_invisible(cp) || cp_emoji(cp));
+		if ((!len || special) && rn) {          /* flush plain text */
+			run[rn] = 0;
+			vita2d_pgf_draw_text(font, (int)fx, top + asc, color, fscale, run);
+			fx += text_w(run);
+			rn = 0;
+		}
+		if (!len)
+			break;
+		if (special) {
+			if (!cp_invisible(cp)) {
+				EGlyph *g = emoji_glyph(cp);
+				if (g && g->ok)
+					vita2d_draw_texture_tint_part(eatlas, (int)fx + g->left, top + asc - g->top, g->x, g->y, g->w, g->h, color);
+				fx += char_width(cp);
+			}
+		} else if (rn + len < (int)sizeof(run) - 1) {
+			memcpy(run + rn, p, len);
+			rn += len;
+		}
+		p += len;
+	}
 }
 
 /* Draws text cut to maxw pixels, adding "..." when truncated */
@@ -353,7 +526,8 @@ enum {
 	A_QUICK, A_Q_NICK, A_Q_SENT, A_CTX_MENTION, A_CTX_PM, A_CTX_TRANSLATE, A_URL, A_LINKS, A_NOP,
 	A_SUB_TRANS, A_SUB_IMG, A_SUB_CHAN, A_CHAN_LANG_MENU, A_CHAN_LANG, A_SEARCH, A_JUMP, A_LAST_MENTION,
 	A_AWAY, A_BACK, A_CAMERA, A_CTX_IGNORE, A_U_PM, A_U_MENTION, A_U_WHOIS, A_U_IGNORE, A_U_MODE,
-	A_U_KICK, A_U_KICKBAN, A_PRESET, A_INVITE_JOIN
+	A_U_KICK, A_U_KICKBAN, A_PRESET, A_INVITE_JOIN, A_REACT_MENU, A_REACT, A_MUTE, A_COMPLETE,
+	A_UPLOADS, A_UPLOAD_ITEM, A_UPLOAD_DEL
 };
 typedef struct { char label[160]; int action; int arg; } MenuItem;
 static MenuItem menu[32];
@@ -398,6 +572,26 @@ static char     u_nick[40];
 
 /* camera */
 static int      cam_back = 1;
+
+/* reactions offered in the message menu */
+static const char *react_emojis[] = { "👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉", "👀", "✅" };
+#define NREACTS ((int)(sizeof(react_emojis) / sizeof(react_emojis[0])))
+
+/* nick completion: "@ab" at the end of a message */
+static char     comp_base[460];
+static char     comp_nicks[12][40];
+static int      comp_whole;
+static char     ime_reopen[460];
+static int      ime_reopen_req;
+
+/* recent uploads (uploads.txt) */
+#define MAX_UPLOADS_SHOWN 10
+static char     up_link[MAX_UPLOADS_SHOWN][300];
+static char     up_del[MAX_UPLOADS_SHOWN][200];
+
+/* newer release found on GitHub */
+static char     upd_tag[32];
+static char     upd_url[200];
 
 static const unsigned int mirc_pal[16] = {
 	RGBA8(0xff, 0xff, 0xff, 0xff), RGBA8(0x8a, 0x8a, 0x8a, 0xff), RGBA8(0x6a, 0x7e, 0xff, 0xff), RGBA8(0x3f, 0xbf, 0x3f, 0xff),
@@ -587,6 +781,12 @@ static void msg_layout(Msg *m, int width)
 		m->lay_text_lines = 1;
 		return;
 	}
+	if (m->type == MT_DATE) {
+		m->lay_breaks[0] = 0;
+		m->lay_lines = m->lay_text_lines = 1;
+		m->lay_w = width;
+		return;
+	}
 	char pre[64];
 	msg_prefix(m, pre, sizeof(pre));
 	int tw = time_w();
@@ -596,12 +796,28 @@ static void msg_layout(Msg *m, int width)
 	m->lay_text_lines = n;
 	if (m->trans_state == TR_DONE && m->trans) {
 		int aw = text_w("» ");
-		n += wrap(m->trans, width - tw - aw, width - tw - aw, m->lay_breaks + n, MAX_BREAKS - n, 0);
+		n += wrap(m->trans, width - tw - aw, width - tw - aw, m->lay_breaks + n, MAX_BREAKS - n - 1, 0);
 	} else if (m->trans_state == TR_PENDING) {
 		n += 1;
 	}
+	if (m->reacts && m->reacts->n)
+		n += 1;                     /* reactions row */
 	m->lay_lines = n;
 	m->lay_w = width;
+}
+
+/* "Today", "Yesterday" or "Thu 08/10/2026" */
+static void date_label(int64_t ts, char *out, int n)
+{
+	static const char *days[] = { "domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado" };
+	int ymd = ts_local_ymd(ts);
+	int diff = ymd_diff_days(ymd, ts_local_ymd(unix_ms_now()));
+	if (diff == 0)
+		snprintf(out, n, "%s", T("Hoy"));
+	else if (diff == 1)
+		snprintf(out, n, "%s", T("Ayer"));
+	else
+		snprintf(out, n, "%s %02d/%02d/%04d", T(days[ts_local_weekday(ts)]), ymd % 100, ymd / 100 % 100, ymd / 10000);
 }
 
 static unsigned int msg_color(Msg *m)
@@ -673,9 +889,38 @@ static void draw_rich(Msg *m, int x, int top, unsigned int def, int from, int to
 	}
 }
 
+static void draw_reacts(Msg *m, int x, int top)
+{
+	for (int i = 0; i < m->reacts->n; i++) {
+		React *r = &m->reacts->r[i];
+		char b[48];
+		snprintf(b, sizeof(b), "%s %d", r->emoji, r->count);
+		int w = text_w(b) + 12;
+		vita2d_draw_rectangle(x, top + 2, w, lh - 4, r->mine ? RGBA8(0x3a, 0x34, 0x10, 0xff) : C_SEL);
+		if (r->mine)
+			draw_rect_outline(x, top + 2, w, lh - 4, C_ACCENT);
+		draw_text(x + 6, top, r->mine ? C_ACCENT : C_TEXT, b);
+		x += w + 6;
+	}
+}
+
 static void draw_msg_line(Msg *m, int line, int x, int top, int width)
 {
 	int tw = time_w();
+	if (m->type == MT_DATE) {
+		char b[64];
+		date_label(m->ts, b, sizeof(b));
+		int w = text_w(b);
+		int cx = x + (width - w) / 2;
+		vita2d_draw_rectangle(x, top + lh / 2, cx - x - 10, 1, C_LINE);
+		vita2d_draw_rectangle(cx + w + 10, top + lh / 2, x + width - (cx + w + 10), 1, C_LINE);
+		draw_text(cx, top, C_DIM, b);
+		return;
+	}
+	if (m->reacts && m->reacts->n && line == m->lay_lines - 1) {
+		draw_reacts(m, x + tw, top);
+		return;
+	}
 	if (jump_id == m->id && now_ms() < jump_until && g_view_uid == jump_uid)
 		vita2d_draw_rectangle(x - 4, top, width + 8, lh, RGBA8(0x2a, 0x3a, 0x5a, 0xff));
 	if (m->highlight && line < m->lay_text_lines)
@@ -687,22 +932,23 @@ static void draw_msg_line(Msg *m, int line, int x, int top, int width)
 		int to = (m->lay_breaks && line + 1 < m->lay_text_lines) ? m->lay_breaks[line + 1] : (int)strlen(t);
 		int tx = x + tw;
 		if (line == 0) {
-			draw_text(x, top, C_FAINT, m->time);
+			draw_text(x, top, C_FAINT, m->pending ? "···" : m->time);
 			char pre[64];
 			msg_prefix(m, pre, sizeof(pre));
 			unsigned int pc = (m->type == MT_MSG || m->type == MT_ACTION)
 			                  ? (m->self ? C_ACCENT : nick_color(m->nick)) : msg_color(m);
-			draw_text(tx, top, pc, pre);
+			draw_text(tx, top, m->pending ? C_FAINT : pc, pre);
 			tx += text_w(pre);
 		}
-		draw_rich(m, tx, top, msg_color(m), from, to);
+		draw_rich(m, tx, top, m->pending ? C_FAINT : msg_color(m), from, to);
 	} else if (m->trans_state == TR_PENDING) {
 		draw_text(x + tw, top, C_FAINT, T("» traduciendo..."));
 	} else if (m->trans) {
 		int li = line - m->lay_text_lines;
 		int base = m->lay_text_lines;
+		int end = m->lay_lines - (m->reacts && m->reacts->n ? 1 : 0);
 		int from = m->lay_breaks[base + li];
-		int to = (base + li + 1 < m->lay_lines) ? m->lay_breaks[base + li + 1] : (int)strlen(m->trans);
+		int to = (base + li + 1 < end) ? m->lay_breaks[base + li + 1] : (int)strlen(m->trans);
 		int ax = x + tw;
 		if (li == 0)
 			draw_text(ax, top, C_TRANS, "»");
@@ -799,6 +1045,12 @@ static void draw_chat(Chan *c)
 	}
 	vita2d_disable_clipping();
 
+	if (c->hist_req == HR_BEFORE) {
+		const char *t = T("Cargando mensajes anteriores...");
+		int w = text_w(t) + 20;
+		vita2d_draw_rectangle(x + (width - w) / 2, top + 2, w, lh + 4, C_SEL);
+		draw_text(x + (width - w) / 2 + 10, top + 4, C_TRANS, t);
+	}
 	if (c->scroll > 0) {
 		const char *t = T("▼ mensajes nuevos abajo");
 		int w = text_w(t) + 20;
@@ -901,7 +1153,7 @@ static void draw_sidebar(void)
 			              g_cfg.servers[r->sidx].name);
 		} else {
 			unsigned int col = r->c->type == CH_QUERY ? C_PM : C_CHAN;
-			if (r->c->type == CH_CHANNEL && !r->c->joined)
+			if ((r->c->type == CH_CHANNEL && !r->c->joined) || r->c->muted)
 				col = C_FAINT;
 			if (selected)
 				col = r->c->type == CH_QUERY ? C_PM : C_TEXT;
@@ -1145,7 +1397,7 @@ static void open_menu(void)
 		}
 		if (is_win) {
 			menu_add(T("Traducción..."), A_SUB_TRANS);
-			menu_add(T("Imágenes (Imgur, cámara, enlaces)..."), A_SUB_IMG);
+			menu_add(T("Imágenes (subir, cámara, enlaces)..."), A_SUB_IMG);
 			menu_add(T("Buscar en el canal..."), A_SEARCH);
 			menu_add(T("Ir a la última mención"), A_LAST_MENTION);
 		}
@@ -1166,7 +1418,7 @@ static void open_menu(void)
 		menu_add(b, s->want_connect ? A_DISCONNECT : A_CONNECT);
 	}
 	menu_add(T("Servidores..."), A_SERVERS);
-	menu_add(T("Ajustes (ChatGPT, Imgur...)"), A_SETTINGS);
+	menu_add(T("Ajustes (traducción, imágenes...)"), A_SETTINGS);
 	menu_add(T("Ayuda y controles"), A_HELP);
 	menu_add(T("Salir de VitaIRC"), A_EXIT);
 	menu_open = 1;
@@ -1191,10 +1443,90 @@ static void open_sub_trans(void)
 
 static void open_sub_img(void)
 {
+	char b[120];
 	menu_begin(T("Imágenes"));
-	menu_add(T("Subir imagen a Imgur..."), A_UPLOAD);
+	snprintf(b, sizeof(b), T("Subir imagen (%s)..."), img_host_name(g_cfg.img_host));
+	menu_add(b, A_UPLOAD);
 	menu_add(T("Tomar foto con la cámara y subirla"), A_CAMERA);
+	menu_add(T("Mis subidas recientes"), A_UPLOADS);
 	menu_add(T("Enlaces e imágenes del canal"), A_LINKS);
+	menu_open = 1;
+}
+
+/* Newest entries of uploads.txt: "date time \t service \t link \t delete-url" */
+static void open_uploads(void)
+{
+	FILE *f = fopen(DATA_DIR "/uploads.txt", "rb");
+	if (!f) {
+		ui_toast(T("Todavía no has subido imágenes"));
+		return;
+	}
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	long from = size > 8192 ? size - 8192 : 0;
+	fseek(f, from, SEEK_SET);
+	char *buf = malloc(size - from + 1);
+	long n = buf ? (long)fread(buf, 1, size - from, f) : 0;
+	fclose(f);
+	if (!buf)
+		return;
+	buf[n] = 0;
+	char *lines[64];
+	int nl = 0;
+	for (char *p = buf, *nx; p && *p && nl < 64; p = nx) {
+		nx = strchr(p, '\n');
+		if (nx)
+			*nx++ = 0;
+		if (from && p == buf)
+			continue;              /* partial first line */
+		lines[nl++] = p;
+	}
+	menu_begin(T("Mis subidas recientes"));
+	int k = 0;
+	for (int i = nl - 1; i >= 0 && k < MAX_UPLOADS_SHOWN; i--) {
+		char *fld[4] = { lines[i], NULL, NULL, NULL };
+		int nf = 1;
+		for (char *q = lines[i]; *q && nf < 4; q++)
+			if (*q == '\t') {
+				*q = 0;
+				fld[nf++] = q + 1;
+			}
+		if (nf < 3)
+			continue;
+		str_copy(up_link[k], fld[2], sizeof(up_link[0]));
+		str_copy(up_del[k], nf > 3 ? fld[3] : "", sizeof(up_del[0]));
+		char b[160];
+		snprintf(b, sizeof(b), "%s  [%s]  %s", fld[0], fld[1], fld[2]);
+		menu_add_arg(b, A_UPLOAD_ITEM, k);
+		if (up_del[k][0])
+			menu_add_arg(T("      borrar esta imagen (se abre en el navegador)"), A_UPLOAD_DEL, k);
+		k++;
+	}
+	free(buf);
+	if (!k) {
+		ui_toast(T("Todavía no has subido imágenes"));
+		return;
+	}
+	menu_open = 1;
+}
+
+static void open_react_menu(void)
+{
+	Chan *c = cur_chan();
+	Msg *m = c ? irc_find_msg(c, ctx_msg_id) : NULL;
+	if (!m)
+		return;
+	menu_begin(T("Reaccionar"));
+	for (int i = 0; i < NREACTS; i++) {
+		int mine = 0;
+		if (m->reacts)
+			for (int k = 0; k < m->reacts->n; k++)
+				if (!strcmp(m->reacts->r[k].emoji, react_emojis[i]) && m->reacts->r[k].mine)
+					mine = 1;
+		char b[64];
+		snprintf(b, sizeof(b), "%s   %s", react_emojis[i], mine ? T("(quitar mi reacción)") : "");
+		menu_add_arg(b, A_REACT, i);
+	}
 	menu_open = 1;
 }
 
@@ -1208,6 +1540,7 @@ static void open_sub_chan(void)
 		menu_add(T("Cambiar tema del canal..."), A_TOPIC);
 	if (c->type == CH_CHANNEL && c->joined)
 		menu_add(T("Salir del canal"), A_PART);
+	menu_add(c->muted ? T("Quitar silencio") : T("Silenciar (sin sonido ni avisos)"), A_MUTE);
 	menu_add(T("Cerrar ventana"), A_CLOSE);
 	menu_add(T("Limpiar ventana"), A_CLEAR);
 	menu_open = 1;
@@ -1274,7 +1607,7 @@ static void search_results(const char *q)
 	menu_begin(title);
 	for (int i = c->count - 1; i >= 0 && nmenu < 30; i--) {
 		Msg *m = irc_msg_at(c, i);
-		if (!str_icontains(m->text, q) && !(m->trans && str_icontains(m->trans, q)))
+		if (m->type == MT_DATE || (!str_icontains(m->text, q) && !(m->trans && str_icontains(m->trans, q))))
 			continue;
 		char b[200];
 		snprintf(b, sizeof(b), "%s %s%s%s", m->time, m->nick, m->nick[0] ? ": " : "", m->text);
@@ -1401,6 +1734,9 @@ static void open_msg_menu(Chan *c, uint32_t id)
 		snprintf(b, sizeof(b), irc_is_ignored(m->nick) ? T("Dejar de ignorar a %s") : T("Ignorar a %s"), m->nick);
 		menu_add(b, A_CTX_IGNORE);
 	}
+	Server *s = cur_server();
+	if (s && irc_can_react(s, m))
+		menu_add(T("Reaccionar..."), A_REACT_MENU);
 	if (chatty && m->trans_state != TR_DONE && !tr_should_skip(m->text))
 		menu_add(T("Traducir este mensaje"), A_CTX_TRANSLATE);
 	if (nmenu)
@@ -1603,8 +1939,10 @@ static void draw_image_screen(void)
 		draw_text_fit(30, top + h / 2 - lh, SCR_W - 60, C_ERR, iv_err);
 	}
 	if (iv_upload[0]) {
+		char up[64];
+		snprintf(up, sizeof(up), T("Subir a %s"), img_host_name(g_cfg.img_host));
 		const int g[] = { glyph_ok, G_L, G_R, glyph_back };
-		const char *l[] = { T("Subir a Imgur"), "", "Zoom", T("Volver") };
+		const char *l[] = { up, "", "Zoom", T("Volver") };
 		draw_bottombar_hints(4, g, l);
 	} else {
 		const int g[] = { G_L, G_R, G_DPAD, G_TRIANGLE, glyph_back };
@@ -1654,8 +1992,8 @@ static void do_action(int a)
 		break;
 	case A_TR_IN:
 		if (c) {
-			if (!g_cfg.openai_key[0]) {
-				ui_toast(T("Configura tu API key de OpenAI en Ajustes"));
+			if (!tr_ready()) {
+				ui_toast(T("Configura tu API key de OpenAI en Ajustes (o elige el traductor gratis)"));
 				break;
 			}
 			c->trans_in = !c->trans_in;
@@ -1678,22 +2016,24 @@ static void do_action(int a)
 		break;
 	case A_TR_OUT:
 		if (c) {
-			if (!g_cfg.openai_key[0]) {
-				ui_toast(T("Configura tu API key de OpenAI en Ajustes"));
+			if (!tr_ready()) {
+				ui_toast(T("Configura tu API key de OpenAI en Ajustes (o elige el traductor gratis)"));
 				break;
 			}
 			c->trans_out = !c->trans_out;
-			ui_toast(T("Tus mensajes %s"), c->trans_out ? T("se traducirán con ChatGPT") : T("se envían sin traducir"));
+			ui_toast(T("Tus mensajes %s"), c->trans_out ? T("se traducirán antes de enviarse") : T("se envían sin traducir"));
 		}
 		break;
-	case A_UPLOAD:
-		if (!g_cfg.imgur_id[0]) {
-			ui_toast(T("Configura tu Client-ID de Imgur en Ajustes"));
+	case A_UPLOAD: {
+		char why[160];
+		if (!img_host_ready(s ? s->idx : -1, why, sizeof(why))) {
+			ui_toast("%s", why);
 			break;
 		}
 		screen = SCR_FILES;
 		fb_load();
 		break;
+	}
 	case A_LIST:
 		if (s) {
 			screen = SCR_CHANLIST;
@@ -1762,8 +2102,8 @@ static void do_action(int a)
 	case A_CTX_TRANSLATE:
 		if (s && c) {
 			Msg *m = irc_find_msg(c, ctx_msg_id);
-			if (!g_cfg.openai_key[0]) {
-				ui_toast(T("Configura tu API key de OpenAI en Ajustes"));
+			if (!tr_ready()) {
+				ui_toast(T("Configura tu API key de OpenAI en Ajustes (o elige el traductor gratis)"));
 			} else if (m) {
 				m->trans_state = TR_PENDING;
 				m->lay_w = 0;
@@ -1831,14 +2171,16 @@ static void do_action(int a)
 		if (s)
 			irc_user_input(s->idx, c ? c->uid : 0, "/back");
 		break;
-	case A_CAMERA:
-		if (!g_cfg.imgur_id[0])
-			ui_toast(T("Configura tu Client-ID de Imgur en Ajustes"));
+	case A_CAMERA: {
+		char why[160];
+		if (!img_host_ready(s ? s->idx : -1, why, sizeof(why)))
+			ui_toast("%s", why);
 		else if (cam_open(cam_back) == 0)
 			screen = SCR_CAMERA;
 		else
 			ui_toast(T("No se pudo abrir la cámara"));
 		break;
+	}
 	case A_CTX_IGNORE:
 	case A_U_IGNORE:
 		if (s) {
@@ -1898,6 +2240,39 @@ static void do_action(int a)
 			irc_user_input(s->idx, c->uid, b);
 			screen = SCR_CHAT;
 		}
+		break;
+	case A_REACT_MENU:
+		open_react_menu();
+		break;
+	case A_REACT:
+		if (s && c) {
+			Msg *m = irc_find_msg(c, ctx_msg_id);
+			if (m)
+				irc_send_react(s, c, m, react_emojis[menu_arg]);
+		}
+		break;
+	case A_MUTE:
+		if (c) {
+			c->muted = !c->muted;
+			session_save();
+			ui_toast(c->muted ? T("%s silenciado") : T("%s ya no está silenciado"), c->name);
+		}
+		break;
+	case A_COMPLETE: {
+		char b[460];
+		snprintf(b, sizeof(b), "%s%s%s", comp_base, comp_nicks[menu_arg], comp_whole ? ": " : " ");
+		str_copy(ime_reopen, b, sizeof(ime_reopen));
+		ime_reopen_req = 1;
+		break;
+	}
+	case A_UPLOADS:
+		open_uploads();
+		break;
+	case A_UPLOAD_ITEM:
+		open_chat_ime(up_link[menu_arg]);
+		break;
+	case A_UPLOAD_DEL:
+		open_browser(up_del[menu_arg]);
 		break;
 	case A_PRESET:
 		start_edit_server(-1);
@@ -2043,18 +2418,23 @@ static void chat_input(void)
 		else if (c->type != CH_STATUS)
 			open_quick();
 	}
-	int page = visible_lines() - 2;
-	if (REPEAT(SCE_CTRL_UP)) c->scroll += 3;
+	int older = 0;
+	if (REPEAT(SCE_CTRL_UP)) { c->scroll += 3; older = 1; }
 	if (REPEAT(SCE_CTRL_DOWN)) c->scroll -= 3;
-	(void)page;
 
 	/* touch */
 	static int acc;
 	if (touch_down && touch_moved && touch_sx > SIDE_W && touch_dy) {
 		acc += touch_dy;
-		while (acc >= lh) { c->scroll++; acc -= lh; }
+		while (acc >= lh) { c->scroll++; acc -= lh; older = 1; }
 		while (acc <= -lh) { c->scroll--; acc += lh; }
 		g_dirty = 1;
+	}
+	/* pushing past the oldest message asks the server for more (chathistory) */
+	if (older) {
+		int maxs = total_lines(c, msg_area_w()) - visible_lines();
+		if (c->scroll > (maxs > 0 ? maxs : 0))
+			irc_request_older(s, c);
 	}
 	if (!touch_down)
 		acc = 0;
@@ -2093,7 +2473,7 @@ static void draw_chat_screen(void)
 			snprintf(sub, sizeof(sub), "%s  ·  %s  ·  %s%s", s->cfg.host, s->nick[0] ? s->nick : s->cfg.nick, state_text(s->state),
 			         s->away ? T("  ·  ausente") : "");
 		} else if (c->type == CH_CHANNEL) {
-			snprintf(title, sizeof(title), "%s", c->name);
+			snprintf(title, sizeof(title), "%s%s", c->name, c->muted ? T(" (silenciado)") : "");
 			snprintf(sub, sizeof(sub), T("%d usuarios%s%s"), c->nusers, c->topic[0] ? "  ·  " : "", c->topic);
 		} else {
 			snprintf(title, sizeof(title), "@%s", c->name);
@@ -2342,20 +2722,57 @@ static void draw_edit_screen(void)
 /* ------------------------------------------------------------------ */
 /* Settings                                                           */
 /* ------------------------------------------------------------------ */
-enum { S_KEY, S_MODEL, S_LANG_IN, S_LANG_OUT, S_USAGE, S_IMGUR, S_HIGHLIGHT, S_IGNORE, S_SOUND, S_COLORS, S_JOINS, S_AWAKE, S_CPU, S_FONT, S_UILANG, S_ABOUT, S_COUNT };
+enum { S_TRPROV, S_KEY, S_MODEL, S_LANG_IN, S_LANG_OUT, S_USAGE, S_IMGHOST, S_IMGEXP, S_IMGBB, S_IMGUR,
+       S_HIGHLIGHT, S_IGNORE, S_SOUND, S_COLORS, S_JOINS, S_AWAKE, S_CPU, S_FONT, S_UILANG, S_UPDATE, S_ABOUT, S_COUNT };
+
+static const char *litter_names[] = { "1 hora", "12 horas", "24 horas", "72 horas" };
+static const char *imgbb_exp_names[] = { "nunca", "1 hora", "1 día", "1 semana", "1 mes" };
+
+static void masked_key(const char *key, char *value, int n)
+{
+	if (key[0]) {
+		int len = strlen(key);
+		snprintf(value, n, "%.3s...%s", key, len > 4 ? key + len - 4 : "");
+	} else {
+		snprintf(value, n, T("(sin configurar)"));
+	}
+}
 
 static void settings_label(int f, char *label, char *value, int n)
 {
 	value[0] = 0;
 	switch (f) {
+	case S_TRPROV:
+		strcpy(label, T("Traductor"));
+		snprintf(value, n, "< %s >", tr_provider_name(g_cfg.tr_provider));
+		break;
 	case S_KEY:
 		strcpy(label, T("API key de OpenAI (ChatGPT)"));
-		if (g_cfg.openai_key[0]) {
-			int len = strlen(g_cfg.openai_key);
-			snprintf(value, n, "%.3s...%s", g_cfg.openai_key, len > 4 ? g_cfg.openai_key + len - 4 : "");
-		} else {
-			snprintf(value, n, T("(sin configurar)"));
-		}
+		masked_key(g_cfg.openai_key, value, n);
+		break;
+	case S_IMGHOST:
+		strcpy(label, T("Servicio de imágenes"));
+		snprintf(value, n, "< %s >", img_host_name(g_cfg.img_host));
+		break;
+	case S_IMGEXP:
+		strcpy(label, T("Las imágenes se borran tras"));
+		if (g_cfg.img_host == IMG_LITTERBOX)
+			snprintf(value, n, "< %s >", T(litter_names[g_cfg.litter_time]));
+		else if (g_cfg.img_host == IMG_IMGBB)
+			snprintf(value, n, "< %s >", T(imgbb_exp_names[g_cfg.imgbb_expire]));
+		else
+			snprintf(value, n, T("(lo decide el servicio)"));
+		break;
+	case S_IMGBB:
+		strcpy(label, T("API key de ImgBB"));
+		masked_key(g_cfg.imgbb_key, value, n);
+		break;
+	case S_UPDATE:
+		strcpy(label, T("Buscar actualizaciones"));
+		if (upd_tag[0])
+			snprintf(value, n, T("¡%s disponible! Pulsa para abrir la página"), upd_tag);
+		else
+			snprintf(value, n, T("< automático: %s >  ·  pulsa para buscar ahora"), g_cfg.update_check ? T("Sí") : "No");
 		break;
 	case S_MODEL:    strcpy(label, T("Modelo")); snprintf(value, n, "%s", g_cfg.openai_model); break;
 	case S_LANG_IN:  strcpy(label, T("Traducir recibidos a")); snprintf(value, n, "< %s >", g_lang_names[lang_index(g_cfg.lang_in)]); break;
@@ -2418,11 +2835,29 @@ static void settings_input(void)
 	int act = list_nav(S_COUNT);
 	int f = list_sel;
 	int d = REPEAT(SCE_CTRL_LEFT) ? -1 : REPEAT(SCE_CTRL_RIGHT) ? 1 : 0;
-	if (!d && (PRESSED(btn_ok) || act) && (f == S_LANG_IN || f == S_LANG_OUT || f == S_CPU || f == S_FONT || f == S_UILANG))
+	if (!d && (PRESSED(btn_ok) || act) && (f == S_LANG_IN || f == S_LANG_OUT || f == S_CPU || f == S_FONT || f == S_UILANG ||
+	                                       f == S_TRPROV || f == S_IMGHOST || f == S_IMGEXP))
 		d = 1;
 	int changed = 0;
 	if (d) {
-		if (f == S_LANG_IN) {
+		if (f == S_TRPROV) {
+			g_cfg.tr_provider = (g_cfg.tr_provider + d + TRP_COUNT) % TRP_COUNT;
+			if (g_cfg.tr_provider == TRP_OPENAI && !g_cfg.openai_key[0])
+				ui_toast(T("ChatGPT necesita tu API key de OpenAI (fila siguiente)"));
+			changed = 1;
+		} else if (f == S_IMGHOST) {
+			g_cfg.img_host = (g_cfg.img_host + d + IMG_COUNT) % IMG_COUNT;
+			changed = 1;
+		} else if (f == S_IMGEXP) {
+			if (g_cfg.img_host == IMG_LITTERBOX)
+				g_cfg.litter_time = (g_cfg.litter_time + d + 4) % 4;
+			else if (g_cfg.img_host == IMG_IMGBB)
+				g_cfg.imgbb_expire = (g_cfg.imgbb_expire + d + 5) % 5;
+			changed = 1;
+		} else if (f == S_UPDATE && !upd_tag[0]) {
+			g_cfg.update_check = !g_cfg.update_check;
+			changed = 1;
+		} else if (f == S_LANG_IN) {
 			strcpy(g_cfg.lang_in, g_lang_codes[(lang_index(g_cfg.lang_in) + d + g_lang_count) % g_lang_count]);
 			changed = 1;
 		} else if (f == S_LANG_OUT) {
@@ -2453,6 +2888,15 @@ static void settings_input(void)
 		case S_KEY:   ime.field = g_cfg.openai_key; ime.fieldlen = sizeof(g_cfg.openai_key); ime_open(IME_FIELD, T("API key de OpenAI (sk-...)"), g_cfg.openai_key, 250, 0, 0); break;
 		case S_MODEL: ime.field = g_cfg.openai_model; ime.fieldlen = sizeof(g_cfg.openai_model); ime_open(IME_FIELD, T("Modelo (ej: gpt-4o-mini)"), g_cfg.openai_model, 46, 0, 0); break;
 		case S_IMGUR: ime.field = g_cfg.imgur_id; ime.fieldlen = sizeof(g_cfg.imgur_id); ime_open(IME_FIELD, T("Client-ID de Imgur"), g_cfg.imgur_id, 60, 0, 0); break;
+		case S_IMGBB: ime.field = g_cfg.imgbb_key; ime.fieldlen = sizeof(g_cfg.imgbb_key); ime_open(IME_FIELD, T("API key de ImgBB (api.imgbb.com)"), g_cfg.imgbb_key, 78, 0, 0); break;
+		case S_UPDATE:
+			if (upd_url[0]) {
+				open_browser(upd_url);
+			} else {
+				update_check_request(1);
+				ui_toast(T("Buscando actualizaciones..."));
+			}
+			break;
 		case S_JOINS: g_cfg.show_joins = !g_cfg.show_joins; changed = 1; break;
 		case S_SOUND: g_cfg.sound = !g_cfg.sound; changed = 1; if (g_cfg.sound) g_beep_req = 1; break;
 		case S_COLORS: g_cfg.irc_colors = !g_cfg.irc_colors; changed = 1; break;
@@ -2613,7 +3057,7 @@ static void draw_chanlist_screen(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* File browser (Imgur upload)                                        */
+/* File browser (image upload)                                        */
 /* ------------------------------------------------------------------ */
 static int is_image(const char *n)
 {
@@ -2707,7 +3151,9 @@ static void files_input(void)
 static void draw_files_screen(void)
 {
 	vita2d_draw_rectangle(0, TOP_H, SCR_W, SCR_H - TOP_H, C_BG);
-	draw_topbar(T("Subir imagen a Imgur"), fb_path);
+	char title[64];
+	snprintf(title, sizeof(title), T("Subir imagen a %s"), img_host_name(g_cfg.img_host));
+	draw_topbar(title, fb_path);
 	int rh = lh + 10;
 	list_clamp(fb_n, rh);
 	int vis = list_rows_visible(rh);
@@ -2734,7 +3180,7 @@ static void draw_help_screen(void)
 	draw_topbar(T("Ayuda"), T("controles y comandos"));
 	static const char *lines[] = {
 		"Botón confirmar: escribir mensaje (teclado en pantalla). También puedes tocar la barra inferior.",
-		"Triángulo / START: menú.   Cuadrado: traducir mensajes recibidos con ChatGPT en este canal.",
+		"Triángulo / START: menú.   Cuadrado: traducir los mensajes recibidos en este canal.",
 		"L / R o izquierda / derecha: cambiar de canal.   Arriba / abajo o deslizar: desplazar mensajes.",
 		"SELECT: servidores.   Toca un canal en la barra lateral para abrirlo.",
 		"Botón volver: respuestas rápidas (nicks y mensajes enviados). Toca un mensaje para ver sus opciones.",
@@ -2742,10 +3188,10 @@ static void draw_help_screen(void)
 		"Comandos: /join #canal  /part  /msg nick texto  /query nick  /me acción  /nick nuevo",
 		"/topic texto  /whois nick  /list  /notice  /quote RAW  /connect  /disconnect  /clear  /help",
 		"",
-		"Traducción: pon tu API key de OpenAI en Ajustes. Los recibidos se traducen al idioma elegido y",
+		"Traducción: gratis con Google, o con ChatGPT si pones tu API key de OpenAI en Ajustes.",
 		"\"Traducir mis mensajes\" envía lo que escribes traducido al idioma de salida.",
-		"Imgur: crea un Client-ID en api.imgur.com/oauth2/addclient (tipo anónimo) y ponlo en Ajustes.",
-		"Las capturas de la Vita están en ux0:picture/SCREENSHOT.",
+		"Imágenes: Litterbox funciona sin cuenta; ImgBB, Imgur o tu soju (FILEHOST) se eligen en Ajustes.",
+		"Escribe @ y el comienzo de un nick para completarlo. Toca un mensaje para reaccionar.",
 		"Bouncer (soju/ZNC): agrégalo como servidor; los mensajes perdidos llegan con su hora real.",
 		"Usuarios: confirmar abre opciones (privado, ignorar y, si eres operador, op, voz, kick y ban).",
 		"",
@@ -2796,6 +3242,48 @@ static void ime_poll(void)
 	pthread_mutex_unlock(&g_lock);
 }
 
+/* "hola @ab" -> "hola abcde " (one match) or a menu of matching nicks.
+ * Returns 1 when the message was not sent. */
+static int nick_complete(const char *text)
+{
+	size_t n = strlen(text);
+	if (!n || text[n - 1] == ' ')
+		return 0;
+	const char *w = strrchr(text, ' ');
+	w = w ? w + 1 : text;
+	if (w[0] != '@' || !w[1] || (size_t)(w - text) >= sizeof(comp_base))
+		return 0;
+	Chan *c = irc_find_chan_uid(&g_servers[ime.sidx], ime.uid);
+	if (!c || c->type == CH_STATUS)
+		return 0;
+	const char *frag = w + 1;
+	size_t fl = strlen(frag);
+	int nm = 0;
+	if (c->type == CH_QUERY) {
+		if (!strncasecmp(c->name, frag, fl))
+			str_copy(comp_nicks[nm++], c->name, sizeof(comp_nicks[0]));
+	} else {
+		for (int i = 0; i < c->nusers && nm < 12; i++)
+			if (!strncasecmp(c->users[i].nick, frag, fl))
+				str_copy(comp_nicks[nm++], c->users[i].nick, sizeof(comp_nicks[0]));
+	}
+	if (!nm)
+		return 0;
+	memcpy(comp_base, text, w - text);
+	comp_base[w - text] = 0;
+	comp_whole = (w == text);
+	if (nm == 1) {
+		snprintf(ime_reopen, sizeof(ime_reopen), "%s%s%s", comp_base, comp_nicks[0], comp_whole ? ": " : " ");
+		ime_reopen_req = 1;
+		return 1;
+	}
+	menu_begin(T("Completar nick"));
+	for (int i = 0; i < nm; i++)
+		menu_add_arg(comp_nicks[i], A_COMPLETE, i);
+	menu_open = 1;
+	return 1;
+}
+
 static void ime_apply(char *text)
 {
 	char cmd[2200];
@@ -2803,6 +3291,8 @@ static void ime_apply(char *text)
 	case IME_CHAT:
 		if (draft_sidx == ime.sidx && draft_uid == ime.uid)
 			draft[0] = 0;
+		if (text[0] && nick_complete(text))
+			break;
 		if (text[0]) {
 			/* remember it for T("Respuestas rápidas") */
 			int dup = -1;
@@ -2911,6 +3401,9 @@ static void demo_fill(void)
 	if (!g_cfg.imgur_id[0])
 		strcpy(g_cfg.imgur_id, "demo");
 	strcpy(g_cfg.highlight, "vitachat,henkaku");
+	g_line_ts = unix_ms_now() - 86400000LL;          /* yesterday: shows the day separators */
+	irc_add_msg(s, c, MT_MSG, "vitamin", "good night everyone 🌙", 0);
+	g_line_ts = 0;
 	irc_add_msg(s, c, MT_JOIN, NULL, T("Te uniste al canal"), 0);
 	{
 		char tb[160];
@@ -2937,6 +3430,19 @@ static void demo_fill(void)
 	demo_msg(s, c, MT_MSG, s->nick, "sí, MIT. lo subiré pronto a GitHub", NULL);
 #endif
 	demo_msg(s, c, MT_MSG, "bytebard", "nice work! here's my setup: https://i.imgur.com/V1taIRC.png", NULL);
+	{
+		Msg *r = demo_msg(s, c, MT_MSG, "pixel", "VitaIRC 1.1 has emoji now 🎉🔥 👍 ❤️ 😂", NULL);
+		r->msgid = str_dup("demo-1");
+		r->reacts = calloc(1, sizeof(MsgReacts));
+		if (r->reacts) {
+			r->reacts->n = 2;
+			strcpy(r->reacts->r[0].emoji, "👍");
+			r->reacts->r[0].count = 3;
+			r->reacts->r[0].mine = 1;
+			strcpy(r->reacts->r[1].emoji, "❤️");
+			r->reacts->r[1].count = 1;
+		}
+	}
 	demo_msg(s, c, MT_MSG, "kuro", "\x02" "release" "\x02" ": \x03" "09VitaChat 1.2\x03 is out, \x1f" "update now\x0f" " \x03" "04,01 HOT \x03", NULL);
 
 	c->trans_in = 1;
@@ -3027,8 +3533,20 @@ static void demo_tick(void)
 	case 15: g_ui_en = 1; screen = SCR_CHAT; strcpy(demo_shot, "15_chat_en"); break;
 	case 16: open_menu(); strcpy(demo_shot, "16_menu_en"); break;
 #endif
-	case 17: screen = SCR_CHAT; ask_confirm(T("¿Salir de VitaIRC? Se cerrarán las conexiones."), A_EXIT, 0); strcpy(demo_shot, "17_confirm"); break;
-	case 18: app_running = 0; break;
+	case 17:
+		screen = SCR_CHAT;
+		if (c)
+			for (int i = c->count - 1; i >= 0; i--)
+				if (!strcmp(irc_msg_at(c, i)->nick, "pixel")) {
+					ctx_msg_id = irc_msg_at(c, i)->id;
+					open_react_menu();
+					break;
+				}
+		strcpy(demo_shot, "18_react");
+		break;
+	case 18: screen = SCR_SETTINGS; list_sel = S_TRPROV; strcpy(demo_shot, "19_settings_top"); break;
+	case 19: screen = SCR_CHAT; ask_confirm(T("¿Salir de VitaIRC? Se cerrarán las conexiones."), A_EXIT, 0); strcpy(demo_shot, "17_confirm"); break;
+	case 20: app_running = 0; break;
 	}
 	demo_step++;
 	g_dirty = 1;
@@ -3117,6 +3635,7 @@ int main(void)
 	vita2d_set_clear_color(C_BG);
 	vita2d_set_vblank_wait(1);
 	font = vita2d_load_default_pgf();
+	emoji_init();
 	font_setup();
 
 	conn_global_init();
@@ -3134,6 +3653,9 @@ int main(void)
 	net_init();
 	sound_init();
 	check_wifi();
+#ifndef VITAIRC_DEMO
+	update_check_request(0);
+#endif
 
 	for (int i = 0; i < g_cfg.nservers; i++)
 		if (g_cfg.servers[i].autoconnect && !g_cfg.servers[i].deleted)
@@ -3229,6 +3751,18 @@ int main(void)
 		int up_sidx = g_upload_sidx;
 		uint32_t up_uid = g_upload_uid;
 		g_upload_done = 0;
+		if (g_update_done) {
+			if (g_update_done == 1) {
+				str_copy(upd_tag, g_update_tag, sizeof(upd_tag));
+				str_copy(upd_url, g_update_url, sizeof(upd_url));
+				ui_toast(T("Nueva versión %s disponible (Ajustes → Buscar actualizaciones)"), upd_tag);
+			} else if (g_update_done == 2) {
+				ui_toast(T("Ya tienes la última versión (%s)"), APP_VERSION);
+			} else {
+				ui_toast(T("Actualizaciones: %s"), g_update_err);
+			}
+			g_update_done = 0;
+		}
 		pthread_mutex_unlock(&g_lock);
 
 		ime_poll();
@@ -3238,6 +3772,12 @@ int main(void)
 			ime_open(IME_CHAT, T("Imagen subida: agrega un texto o envía el enlace"), upload_text, 450, 0, 0);
 		} else if (upload == -1) {
 			ui_toast(T("Error al subir: %s"), upload_text);
+		}
+		if (ime_reopen_req && !ime.active && !menu_open && !confirm_open) {
+			ime_reopen_req = 0;
+			pthread_mutex_lock(&g_lock);
+			open_chat_ime(ime_reopen);
+			pthread_mutex_unlock(&g_lock);
 		}
 
 		int minute = (int)(now / 60000);
@@ -3292,6 +3832,10 @@ int main(void)
 	}
 	g_app_quit = 1;
 	net_shutdown();
+	if (eatlas) {
+		vita2d_wait_rendering_done();
+		vita2d_free_texture(eatlas);
+	}
 	vita2d_fini();
 	vita2d_free_pgf(font);
 	sceKernelExitProcess(0);

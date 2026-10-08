@@ -36,7 +36,20 @@ volatile int    g_beep_req;
 #define FLOOD_WINDOW 60    /* ... per this many seconds (same as the old daemon) */
 
 static uint32_t g_next_uid = 1;
-static char     g_line_time[6];   /* server-time of the line being handled */
+
+/* IRCv3 tags of the line being handled (also set by hist_load) */
+int64_t         g_line_ts;              /* server-time, 0 = now */
+char            g_line_msgid[96];
+static char     g_line_batch[32];
+static char     g_line_react[24];
+static char     g_line_unreact[24];
+static char     g_line_reply[96];
+
+/* Messages being added are typed offline (not logged yet) */
+static int      g_add_pending;
+/* Replaying history: no sounds or pop-ups per message */
+static int      g_replaying;
+static int      g_replay_mentions;
 
 #define LOCK()   pthread_mutex_lock(&g_lock)
 #define UNLOCK() pthread_mutex_unlock(&g_lock)
@@ -67,7 +80,14 @@ static void msg_free(Msg *m)
 	free(m->trans);
 	free(m->lay_breaks);
 	free(m->spans);
+	free(m->msgid);
+	free(m->reacts);
 	memset(m, 0, sizeof(*m));
+}
+
+static int is_chatty(int type)
+{
+	return type == MT_MSG || type == MT_ACTION || type == MT_NOTICE;
 }
 
 Chan *irc_find_chan(Server *s, const char *name)
@@ -101,11 +121,12 @@ Chan *irc_get_chan(Server *s, const char *name, int type)
 	str_copy(c->name, name, sizeof(c->name));
 	s->chans[s->nchans++] = c;
 	if (type != CH_STATUS) {
-		char saved[6];
-		memcpy(saved, g_line_time, sizeof(saved));
-		g_line_time[0] = 0;
+		int64_t saved_ts = g_line_ts;
+		char saved_id[sizeof(g_line_msgid)];
+		memcpy(saved_id, g_line_msgid, sizeof(saved_id));
 		hist_load(s, c);
-		memcpy(g_line_time, saved, sizeof(saved));
+		g_line_ts = saved_ts;
+		memcpy(g_line_msgid, saved_id, sizeof(saved_id));
 		session_save();
 	}
 	g_dirty = 1;
@@ -149,17 +170,50 @@ Msg *irc_msg_at(Chan *c, int i)
 
 Msg *irc_find_msg(Chan *c, uint32_t id)
 {
+	/* ids are unique but not ordered: history can be merged in later */
 	for (int i = c->count - 1; i >= 0; i--) {
 		Msg *m = irc_msg_at(c, i);
 		if (m->id == id)
 			return m;
-		if (m->id < id)
-			break;
 	}
 	return NULL;
 }
 
-Msg *irc_add_msg(Server *s, Chan *c, int type, const char *nick, const char *text, int self)
+Msg *irc_find_msgid(Chan *c, const char *msgid)
+{
+	if (!msgid || !msgid[0])
+		return NULL;
+	for (int i = c->count - 1; i >= 0; i--) {
+		Msg *m = irc_msg_at(c, i);
+		if (m->msgid && !strcmp(m->msgid, msgid))
+			return m;
+	}
+	return NULL;
+}
+
+/* Fills a message from the current line state (server-time, msgid). */
+static void msg_fill(Msg *m, int type, const char *nick, const char *text, int self)
+{
+	memset(m, 0, sizeof(*m));
+	m->type = type;
+	m->self = self;
+	m->ts = g_line_ts ? g_line_ts : unix_ms_now();
+	ts_local_hhmm(m->ts, m->time);
+	str_copy(m->nick, nick ? nick : "", sizeof(m->nick));
+	if (g_line_msgid[0])
+		m->msgid = str_dup(g_line_msgid);
+	m->text = str_dup(text ? text : "");
+	FmtSpan spans[24];
+	int ns = irc_strip_format_spans(m->text, spans, 24);
+	utf8_truncate(m->text, 1000);
+	if (ns > 0 && (m->spans = malloc(ns * sizeof(FmtSpan)))) {
+		memcpy(m->spans, spans, ns * sizeof(FmtSpan));
+		m->nspans = ns;
+	}
+}
+
+/* Next slot at the end of the window (drops the oldest message when full). */
+static Msg *ring_push(Chan *c)
 {
 	int pos;
 	if (c->count < MAX_MSGS) {
@@ -170,43 +224,54 @@ Msg *irc_add_msg(Server *s, Chan *c, int type, const char *nick, const char *tex
 		msg_free(&c->msgs[pos]);
 		c->head = (c->head + 1) % MAX_MSGS;
 	}
-	Msg *m = &c->msgs[pos];
+	return &c->msgs[pos];
+}
+
+static Msg *push_date_sep(Chan *c, int64_t ts)
+{
+	Msg *m = ring_push(c);
 	memset(m, 0, sizeof(*m));
 	m->id = ++c->next_id;
-	m->type = type;
-	m->self = self;
-	if (g_line_time[0])
-		memcpy(m->time, g_line_time, sizeof(m->time));
-	else
-		time_hhmm(m->time);
-	str_copy(m->nick, nick ? nick : "", sizeof(m->nick));
-	m->text = str_dup(text ? text : "");
-	FmtSpan spans[24];
-	int ns = irc_strip_format_spans(m->text, spans, 24);
-	utf8_truncate(m->text, 1000);
-	if (ns > 0 && (m->spans = malloc(ns * sizeof(FmtSpan)))) {
-		memcpy(m->spans, spans, ns * sizeof(FmtSpan));
-		m->nspans = ns;
-	}
+	m->type = MT_DATE;
+	m->ts = ts;
+	m->text = str_dup("");
+	c->last_ymd = ts_local_ymd(ts);
+	return m;
+}
+
+Msg *irc_add_msg(Server *s, Chan *c, int type, const char *nick, const char *text, int self)
+{
+	int64_t ts = g_line_ts ? g_line_ts : unix_ms_now();
+	if (c->type != CH_STATUS && type != MT_DATE && ts_local_ymd(ts) != c->last_ymd)
+		push_date_sep(c, ts);
+	Msg *m = ring_push(c);
+	msg_fill(m, type, nick, text, self);
+	m->id = ++c->next_id;
+	m->pending = g_add_pending;
 
 	int visible = (g_view_sidx == s->idx && g_view_uid == c->uid);
-	int chatty = (type == MT_MSG || type == MT_ACTION || type == MT_NOTICE);
-	hist_log(s, c, m);
+	int chatty = is_chatty(type);
+	if (!m->pending)
+		hist_log(s, c, m);
 	if (g_loading_history) {
 		if (chatty && !self && c->type != CH_STATUS && irc_is_highlight(s, m->text))
 			m->highlight = 1;
 	} else if (chatty && !self) {
 		if (c->type != CH_STATUS && irc_is_highlight(s, m->text))
 			m->highlight = 1;
-		if ((m->highlight || c->type == CH_QUERY) && g_cfg.sound)
+		int notify = m->highlight || c->type == CH_QUERY;
+		int quiet = c->muted || g_replaying;
+		if (notify && g_cfg.sound && !quiet)
 			g_beep_req = 1;
 		if (!visible) {
 			c->unread++;
-			if (m->highlight || c->type == CH_QUERY) {
+			if (notify) {
 				c->mention++;
-				if (c->type == CH_QUERY)
+				if (g_replaying)
+					g_replay_mentions++;
+				else if (!c->muted && c->type == CH_QUERY)
 					ui_toast(T("PM de %s: %s"), m->nick, m->text);
-				else
+				else if (!c->muted)
 					ui_toast(T("%s en %s: %s"), m->nick, c->name, m->text);
 			}
 		}
@@ -453,8 +518,9 @@ void irc_send_raw(Server *s, const char *fmt, ...)
 	s->outq[s->outq_n++] = str_dup(buf);
 }
 
-/* Splits long text at UTF-8 boundaries so each PRIVMSG fits in 512 bytes. */
-static void send_chunks(Server *s, Chan *c, const char *text, int action)
+/* Splits long text at UTF-8 boundaries so each PRIVMSG fits in 512 bytes.
+ * Each piece is also shown in c (when given). */
+static void send_text(Server *s, const char *target, Chan *c, const char *text, int action)
 {
 	const int maxc = 380;
 	const char *p = text;
@@ -471,14 +537,66 @@ static void send_chunks(Server *s, Chan *c, const char *text, int action)
 		memcpy(chunk, p, n);
 		chunk[n] = 0;
 		if (action)
-			irc_send_raw(s, "PRIVMSG %s :\x01" "ACTION %s\x01", c->name, chunk);
+			irc_send_raw(s, "PRIVMSG %s :\x01" "ACTION %s\x01", target, chunk);
 		else
-			irc_send_raw(s, "PRIVMSG %s :%s", c->name, chunk);
-		irc_add_msg(s, c, action ? MT_ACTION : MT_MSG, s->nick, chunk, 1);
+			irc_send_raw(s, "PRIVMSG %s :%s", target, chunk);
+		if (c)
+			irc_add_msg(s, c, action ? MT_ACTION : MT_MSG, s->nick, chunk, 1);
 		p += n;
 		while (*p == ' ')
 			p++;
 	}
+}
+
+static void send_chunks(Server *s, Chan *c, const char *text, int action)
+{
+	send_text(s, c->name, c, text, action);
+}
+
+/* Offline: show the message now (dimmed) and send it after reconnecting. */
+static void queue_offline(Server *s, Chan *c, const char *text, int action)
+{
+	if (s->offq_n >= MAX_OFFLINE) {
+		irc_add_msg(s, c, MT_ERROR, NULL, T("No conectado: el mensaje no se envió."), 0);
+		return;
+	}
+	g_add_pending = 1;
+	Msg *m = irc_add_msg(s, c, action ? MT_ACTION : MT_MSG, s->nick[0] ? s->nick : s->cfg.nick, text, 1);
+	g_add_pending = 0;
+	OfflineMsg *q = &s->offq[s->offq_n++];
+	q->chan_uid = c->uid;
+	q->msg_id = m->id;
+	q->action = action;
+	q->text = str_dup(text);
+	if (s->offq_n == 1)
+		ui_toast(T("Sin conexión: se enviará al reconectar"));
+}
+
+/* Sends what was typed offline in one window (only = NULL: every query). */
+static void flush_offline(Server *s, Chan *only)
+{
+	int k = 0;
+	for (int i = 0; i < s->offq_n; i++) {
+		OfflineMsg *q = &s->offq[i];
+		Chan *c = irc_find_chan_uid(s, q->chan_uid);
+		if (c && (only ? c != only : c->type != CH_QUERY)) {
+			s->offq[k++] = *q;
+			continue;
+		}
+		if (c) {                       /* a closed window drops its queue */
+			send_text(s, c->name, NULL, q->text, q->action);
+			Msg *m = irc_find_msg(c, q->msg_id);
+			if (m) {
+				m->pending = 0;
+				m->ts = unix_ms_now();
+				ts_local_hhmm(m->ts, m->time);
+				hist_log(s, c, m);
+			}
+		}
+		free(q->text);
+	}
+	s->offq_n = k;
+	g_dirty = 1;
 }
 
 void irc_send_privmsg(int sidx, uint32_t chan_uid, const char *text)
@@ -488,7 +606,7 @@ void irc_send_privmsg(int sidx, uint32_t chan_uid, const char *text)
 	Chan *c = irc_find_chan_uid(s, chan_uid);
 	if (c && c->type != CH_STATUS) {
 		if (s->state != SS_ONLINE)
-			irc_add_msg(s, c, MT_ERROR, NULL, T("No conectado: el mensaje no se envió."), 0);
+			queue_offline(s, c, text, 0);
 		else
 			send_chunks(s, c, text, 0);
 	}
@@ -530,8 +648,8 @@ void irc_user_input(int sidx, uint32_t chan_uid, const char *input)
 		if (c->type == CH_STATUS) {
 			irc_add_msg(s, c, MT_ERROR, NULL, T("Esta es la ventana del servidor. Usa /join #canal o /help."), 0);
 		} else if (s->state != SS_ONLINE) {
-			irc_add_msg(s, c, MT_ERROR, NULL, T("No conectado: el mensaje no se envió."), 0);
-		} else if (c->trans_out && g_cfg.openai_key[0] && !tr_should_skip(body)) {
+			queue_offline(s, c, body, 0);
+		} else if (c->trans_out && tr_ready() && !tr_should_skip(body)) {
 			tr_request_out(sidx, c->uid, body);
 		} else {
 			send_chunks(s, c, body, 0);
@@ -568,6 +686,7 @@ void irc_user_input(int sidx, uint32_t chan_uid, const char *input)
 			msg_free(&c->msgs[k]);
 		c->head = c->count = 0;
 		c->scroll = 0;
+		c->last_ymd = 0;
 		g_dirty = 1;
 		UNLOCK();
 		return;
@@ -603,6 +722,13 @@ void irc_user_input(int sidx, uint32_t chan_uid, const char *input)
 		if (c->type == CH_CHANNEL && c->joined && s->state == SS_ONLINE)
 			irc_send_raw(s, "PART %s :VitaIRC", c->name);
 		irc_close_chan(s, c);
+		UNLOCK();
+		return;
+	}
+
+	if (!strcmp(cmd, "ME") && s->state != SS_ONLINE) {
+		if (c->type != CH_STATUS && args[0])
+			queue_offline(s, c, args, 1);
 		UNLOCK();
 		return;
 	}
@@ -708,18 +834,81 @@ typedef struct {
 	int   np;
 } Line;
 
+/* IRCv3 tag value escaping: \: \s \\ \r \n */
+static void tag_unescape(char *v)
+{
+	char *w = v;
+	for (char *r = v; *r; r++) {
+		if (*r != '\\') {
+			*w++ = *r;
+			continue;
+		}
+		r++;
+		if (!*r) break;
+		switch (*r) {
+		case ':': *w++ = ';'; break;
+		case 's': *w++ = ' '; break;
+		case 'r': *w++ = '\r'; break;
+		case 'n': *w++ = '\n'; break;
+		default:  *w++ = *r; break;
+		}
+	}
+	*w = 0;
+}
+
+static void tag_escape(const char *in, char *out, int n)
+{
+	int k = 0;
+	for (; *in && k < n - 3; in++) {
+		switch (*in) {
+		case ';':  out[k++] = '\\'; out[k++] = ':'; break;
+		case ' ':  out[k++] = '\\'; out[k++] = 's'; break;
+		case '\\': out[k++] = '\\'; out[k++] = '\\'; break;
+		case '\r': out[k++] = '\\'; out[k++] = 'r'; break;
+		case '\n': out[k++] = '\\'; out[k++] = 'n'; break;
+		default:   out[k++] = *in; break;
+		}
+	}
+	out[k] = 0;
+}
+
+static void parse_tags(char *tags)
+{
+	char *save = NULL;
+	for (char *t = strtok_r(tags, ";", &save); t; t = strtok_r(NULL, ";", &save)) {
+		char empty[1] = "";
+		char *v = strchr(t, '=');
+		if (v)
+			*v++ = 0;
+		else
+			v = empty;
+		tag_unescape(v);
+		if (!strcmp(t, "time"))
+			iso_to_unix_ms(v, &g_line_ts);
+		else if (!strcmp(t, "msgid"))
+			str_copy(g_line_msgid, v, sizeof(g_line_msgid));
+		else if (!strcmp(t, "batch"))
+			str_copy(g_line_batch, v, sizeof(g_line_batch));
+		else if (!strcmp(t, "+draft/react"))
+			str_copy(g_line_react, v, sizeof(g_line_react));
+		else if (!strcmp(t, "+draft/unreact"))
+			str_copy(g_line_unreact, v, sizeof(g_line_unreact));
+		else if (!strcmp(t, "+draft/reply"))
+			str_copy(g_line_reply, v, sizeof(g_line_reply));
+	}
+}
+
 static void parse_line(char *buf, Line *l)
 {
 	memset(l, 0, sizeof(*l));
 	char *p = buf;
-	g_line_time[0] = 0;
-	if (*p == '@') {                 /* IRCv3 tags: only server-time is used */
+	g_line_ts = 0;
+	g_line_msgid[0] = g_line_batch[0] = g_line_react[0] = g_line_unreact[0] = g_line_reply[0] = 0;
+	if (*p == '@') {
 		char *end = strchr(p, ' ');
 		if (!end) return;
 		*end = 0;
-		char *t = strstr(p, "time=");
-		if (t && (t == p + 1 || t[-1] == ';'))
-			iso_to_local_hhmm(t + 5, g_line_time);
+		parse_tags(p + 1);
 		p = end + 1;
 		while (*p == ' ') p++;
 	}
@@ -757,6 +946,439 @@ static int is_me(Server *s, const char *nick)
 	return nick && !str_icmp(nick, s->nick);
 }
 
+/* ------------------------------------------------------------------ */
+/* IRCv3 chathistory                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Time of the newest (or oldest) real message in a window, 0 if none. */
+static int64_t chan_edge_ts(Chan *c, int newest)
+{
+	for (int k = 0; k < c->count; k++) {
+		Msg *m = irc_msg_at(c, newest ? c->count - 1 - k : k);
+		if (is_chatty(m->type) && !m->pending && m->ts)
+			return m->ts;
+	}
+	return 0;
+}
+
+static int history_limit(Server *s, int want)
+{
+	if (s->history_max > 0 && s->history_max < want)
+		return s->history_max;
+	return want;
+}
+
+static int history_busy(Chan *c)
+{
+	return c->hist_req && now_ms() - c->hist_req_at < 20000;
+}
+
+/* What was said in a window while we were away (after joining it). */
+static void request_latest(Server *s, Chan *c)
+{
+	if (!s->cap_history || c->type == CH_STATUS || history_busy(c))
+		return;
+	int lim = history_limit(s, 100);
+	int64_t t = chan_edge_ts(c, 1);
+	if (t) {
+		char iso[32];
+		unix_ms_to_iso(t, iso);
+		irc_send_raw(s, "CHATHISTORY LATEST %s timestamp=%s %d", c->name, iso, lim);
+	} else {
+		irc_send_raw(s, "CHATHISTORY LATEST %s * %d", c->name, lim);
+	}
+	c->hist_req = HR_LATEST;
+	c->hist_req_at = now_ms();
+	c->hist_since = t;
+}
+
+int irc_request_older(Server *s, Chan *c)
+{
+	if (!s->cap_history || s->state != SS_ONLINE || c->type == CH_STATUS || c->hist_end || history_busy(c))
+		return 0;
+	int room = MAX_MSGS - c->count - 20;
+	if (room < 10) {
+		ui_toast(T("No caben más mensajes en esta ventana"));
+		c->hist_end = 1;
+		return 0;
+	}
+	int lim = history_limit(s, room < 50 ? room : 50);
+	int64_t t = chan_edge_ts(c, 0);
+	if (t) {
+		char iso[32];
+		unix_ms_to_iso(t, iso);
+		irc_send_raw(s, "CHATHISTORY BEFORE %s timestamp=%s %d", c->name, iso, lim);
+		c->hist_req = HR_BEFORE;
+	} else {
+		irc_send_raw(s, "CHATHISTORY LATEST %s * %d", c->name, lim);
+		c->hist_req = HR_LATEST;
+		c->hist_since = 0;
+	}
+	c->hist_req_at = now_ms();
+	g_dirty = 1;
+	return 1;
+}
+
+static Batch *batch_find(Server *s, const char *ref)
+{
+	if (!ref || !ref[0])
+		return NULL;
+	for (int i = 0; i < MAX_BATCHES; i++)
+		if (s->batches[i].ref[0] && !strcmp(s->batches[i].ref, ref))
+			return &s->batches[i];
+	return NULL;
+}
+
+static void batch_free(Batch *b)
+{
+	for (int i = 0; i < b->n; i++)
+		msg_free(&b->msgs[i]);
+	free(b->msgs);
+	memset(b, 0, sizeof(*b));
+}
+
+static void batches_reset(Server *s)
+{
+	for (int i = 0; i < MAX_BATCHES; i++)
+		batch_free(&s->batches[i]);
+}
+
+/* Inside a chathistory batch: never answer CTCPs, never count floods. */
+static int in_history_batch(Server *s)
+{
+	Batch *b = batch_find(s, g_line_batch);
+	return b && b->type == BT_HISTORY;
+}
+
+static void batch_open(Server *s, const char *ref, const char *type, const char *param)
+{
+	Batch *b = NULL;
+	for (int i = 0; i < MAX_BATCHES && !b; i++)
+		if (!s->batches[i].ref[0])
+			b = &s->batches[i];
+	if (!b)
+		return;                       /* lines of unknown batches are handled one by one */
+	memset(b, 0, sizeof(*b));
+	str_copy(b->ref, ref, sizeof(b->ref));
+	if (!strcmp(type, "chathistory") && param[0]) {
+		Chan *c = is_channel_name(param) ? irc_find_chan(s, param) : irc_get_chan(s, param, CH_QUERY);
+		if (c && c->type != CH_STATUS) {
+			b->type = BT_HISTORY;
+			b->chan_uid = c->uid;
+			b->mode = c->hist_req ? c->hist_req : HR_LATEST;
+			if (!c->hist_req)              /* not asked for: new is what we lack */
+				c->hist_since = chan_edge_ts(c, 1);
+		}
+	} else if (!strcmp(type, "draft/chathistory-targets") || !strcmp(type, "chathistory-targets")) {
+		b->type = BT_TARGETS;
+	}
+}
+
+/* Messages inside a chathistory batch are collected and merged at its end. */
+static int history_collect(Server *s, int type, const char *nick, const char *text)
+{
+	Batch *b = batch_find(s, g_line_batch);
+	if (!b || b->type != BT_HISTORY)
+		return 0;
+	if (b->n == b->cap) {
+		int ncap = b->cap ? b->cap * 2 : 64;
+		Msg *nm = realloc(b->msgs, ncap * sizeof(Msg));
+		if (!nm)
+			return 1;
+		b->msgs = nm;
+		b->cap = ncap;
+	}
+	msg_fill(&b->msgs[b->n++], type, nick, text, is_me(s, nick));
+	return 1;
+}
+
+static int same_msg(const Msg *a, const Msg *b)
+{
+	if (a->msgid && b->msgid && !strcmp(a->msgid, b->msgid))
+		return 1;
+	int64_t d = a->ts - b->ts;
+	if (d < 0)
+		d = -d;
+	/* different ids may still be one message (a bouncer can renumber what it
+	 * stores); logs from older versions keep minutes only */
+	int64_t window = (a->msgid && b->msgid) ? 1000 : 90000;
+	return d < window && a->type == b->type && !str_icmp(a->nick, b->nick) && !strcmp(a->text, b->text);
+}
+
+/* "@#chan" (a message to the channel's operators) -> "#chan" */
+static const char *strip_statusmsg(const char *target)
+{
+	if (!is_channel_name(target) && target[0] && strchr("@%~", target[0]) && is_channel_name(target + 1))
+		return target + 1;
+	return target;
+}
+
+/* Merges a chathistory batch into the window in time order, skipping what is
+ * already there and rebuilding the day separators. */
+static void chan_merge(Server *s, Chan *c, Batch *b)
+{
+	int nadd = 0;
+	for (int j = 0; j < b->n; j++) {
+		Msg *a = &b->msgs[j];
+		int dup = irc_is_ignored(a->nick);
+		for (int i = c->count - 1; i >= 0 && !dup; i--) {
+			Msg *m = irc_msg_at(c, i);
+			if (is_chatty(m->type) && same_msg(m, a))
+				dup = 1;
+		}
+		for (int k = 0; k < nadd && !dup; k++)
+			if (same_msg(&b->msgs[k], a))
+				dup = 1;
+		if (dup)
+			msg_free(a);
+		else
+			b->msgs[nadd++] = *a;
+	}
+	b->n = 0;                          /* the messages now belong to the window */
+	if (!nadd)
+		return;
+	for (int j = 1; j < nadd; j++) {   /* usually already sorted */
+		Msg t = b->msgs[j];
+		int k = j - 1;
+		while (k >= 0 && b->msgs[k].ts > t.ts) {
+			b->msgs[k + 1] = b->msgs[k];
+			k--;
+		}
+		b->msgs[k + 1] = t;
+	}
+
+	/* older pages are never "new"; a LATEST answer is new past the request point */
+	int64_t since = b->mode == HR_BEFORE ? INT64_MAX : c->hist_since;
+	uint32_t first_new = c->next_id + 1;
+	int cap = (c->count + nadd) * 2;
+	Msg *all = malloc(cap * sizeof(Msg));
+	if (!all) {
+		for (int j = 0; j < nadd; j++)
+			msg_free(&b->msgs[j]);
+		return;
+	}
+	/* existing (without separators) and new, by time */
+	int n = 0, j = 0, ymd = 0;
+	for (int i = 0; i <= c->count; i++) {
+		Msg *m = i < c->count ? irc_msg_at(c, i) : NULL;
+		if (m && m->type == MT_DATE) {
+			msg_free(m);
+			continue;
+		}
+		while (j < nadd && (!m || b->msgs[j].ts < m->ts)) {
+			Msg *a = &b->msgs[j++];
+			a->id = ++c->next_id;
+			if (ts_local_ymd(a->ts) != ymd) {
+				ymd = ts_local_ymd(a->ts);
+				Msg *d = &all[n++];
+				memset(d, 0, sizeof(*d));
+				d->id = ++c->next_id;
+				d->type = MT_DATE;
+				d->ts = a->ts;
+				d->text = str_dup("");
+			}
+			all[n++] = *a;
+		}
+		if (!m)
+			break;
+		if (ts_local_ymd(m->ts) != ymd) {
+			ymd = ts_local_ymd(m->ts);
+			Msg *d = &all[n++];
+			memset(d, 0, sizeof(*d));
+			d->id = ++c->next_id;
+			d->type = MT_DATE;
+			d->ts = m->ts;
+			d->text = str_dup("");
+		}
+		all[n++] = *m;
+	}
+	int drop = n > MAX_MSGS ? n - MAX_MSGS : 0;
+	for (int i = 0; i < drop; i++)
+		msg_free(&all[i]);
+	memset(c->msgs, 0, sizeof(c->msgs));
+	memcpy(c->msgs, all + drop, (n - drop) * sizeof(Msg));
+	free(all);
+	c->head = 0;
+	c->count = n - drop;
+	c->last_ymd = ymd;
+
+	/* what is newer than the window had: log it, count it, translate it */
+	int visible = (g_view_sidx == s->idx && g_view_uid == c->uid);
+	int mentions = 0, translate = 12;
+	for (int i = c->count - 1; i >= 0; i--) {
+		Msg *m = irc_msg_at(c, i);
+		if (m->id < first_new || m->type == MT_DATE)
+			continue;
+		if (!m->self && c->type != CH_STATUS && irc_is_highlight(s, m->text))
+			m->highlight = 1;
+		if (m->ts <= since || m->self)
+			continue;
+		if (!visible) {
+			c->unread++;
+			if (m->highlight || c->type == CH_QUERY) {
+				c->mention++;
+				mentions++;
+			}
+		}
+		if (c->trans_in && translate > 0 && !tr_should_skip(m->text)) {
+			m->trans_state = TR_PENDING;
+			tr_request_in(s->idx, c->uid, m->id, m->text, irc_chan_lang(c));
+			translate--;
+		}
+	}
+	for (int i = 0; i < c->count; i++) {     /* the log stays in time order */
+		Msg *m = irc_msg_at(c, i);
+		if (m->id >= first_new && m->type != MT_DATE && m->ts > since)
+			hist_log(s, c, m);
+	}
+	if (mentions && !c->muted) {
+		if (g_cfg.sound)
+			g_beep_req = 1;
+		ui_toast(T("%d mensajes para ti en %s mientras no estabas"), mentions, c->name);
+	}
+	g_dirty = 1;
+}
+
+static void batch_close(Server *s, const char *ref)
+{
+	Batch *b = batch_find(s, ref);
+	if (!b)
+		return;
+	if (b->type == BT_HISTORY) {
+		Chan *c = irc_find_chan_uid(s, b->chan_uid);
+		if (c) {
+			if (b->mode == HR_BEFORE && b->n == 0)
+				c->hist_end = 1;
+			c->hist_req = HR_NONE;
+			chan_merge(s, c, b);
+		}
+	}
+	batch_free(b);
+	g_dirty = 1;
+}
+
+/* Nicks that talk to everybody: their history is not worth a window. */
+static int is_service(const char *n)
+{
+	static const char *svc[] = { "NickServ", "ChanServ", "SaslServ", "MemoServ", "HostServ", "OperServ",
+	                             "BotServ", "BouncerServ", "*status", "Global" };
+	if (strchr(n, '.'))
+		return 1;
+	for (unsigned i = 0; i < sizeof(svc) / sizeof(svc[0]); i++)
+		if (!str_icmp(n, svc[i]))
+			return 1;
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reactions (+draft/react)                                           */
+/* ------------------------------------------------------------------ */
+
+static uint32_t nick_hash(const char *nick)
+{
+	char low[40];
+	int i = 0;
+	for (; nick[i] && i < 39; i++)
+		low[i] = tolower((unsigned char)nick[i]);
+	low[i] = 0;
+	return hash_str(low);
+}
+
+static void react_apply(Msg *m, const char *emoji, const char *nick, int add, int mine)
+{
+	if (!emoji[0])
+		return;
+	uint32_t h = nick_hash(nick);
+	if (!m->reacts) {
+		if (!add || !(m->reacts = calloc(1, sizeof(MsgReacts))))
+			return;
+	}
+	MsgReacts *r = m->reacts;
+	React *e = NULL;
+	for (int i = 0; i < r->n; i++)
+		if (!strcmp(r->r[i].emoji, emoji))
+			e = &r->r[i];
+	if (add) {
+		if (!e) {
+			if (r->n >= MAX_REACTS)
+				return;
+			e = &r->r[r->n++];
+			memset(e, 0, sizeof(*e));
+			str_copy(e->emoji, emoji, sizeof(e->emoji));
+		}
+		for (int k = 0; k < e->nwho; k++)
+			if (e->who[k] == h)
+				return;                /* already counted */
+		if (e->nwho < 8)
+			e->who[e->nwho++] = h;
+		e->count++;
+		if (mine)
+			e->mine = 1;
+	} else {
+		if (!e)
+			return;
+		int found = -1;
+		for (int k = 0; k < e->nwho; k++)
+			if (e->who[k] == h)
+				found = k;
+		if (found >= 0)
+			e->who[found] = e->who[--e->nwho];
+		else if (e->count <= e->nwho)
+			return;                    /* never saw that reaction */
+		e->count--;
+		if (mine)
+			e->mine = 0;
+		if (!e->count) {
+			int i = e - r->r;
+			memmove(&r->r[i], &r->r[i + 1], (r->n - i - 1) * sizeof(React));
+			r->n--;
+		}
+		if (!r->n) {
+			free(m->reacts);
+			m->reacts = NULL;
+		}
+	}
+	m->lay_w = 0;
+	g_dirty = 1;
+}
+
+int irc_can_react(Server *s, Msg *m)
+{
+	return s->cap_tags && s->state == SS_ONLINE && m->msgid && is_chatty(m->type);
+}
+
+void irc_send_react(Server *s, Chan *c, Msg *m, const char *emoji)
+{
+	if (!irc_can_react(s, m))
+		return;
+	int mine = 0;
+	if (m->reacts)
+		for (int i = 0; i < m->reacts->n; i++)
+			if (!strcmp(m->reacts->r[i].emoji, emoji) && m->reacts->r[i].mine)
+				mine = 1;
+	char id[200], em[64];
+	tag_escape(m->msgid, id, sizeof(id));
+	tag_escape(emoji, em, sizeof(em));
+	irc_send_raw(s, "@+draft/%s=%s;+draft/reply=%s TAGMSG %s", mine ? "unreact" : "react", em, id, c->name);
+	react_apply(m, emoji, s->nick, !mine, 1);
+}
+
+/* ISUPPORT values escape some bytes as \xHH */
+static void isupport_unescape(const char *in, char *out, int n)
+{
+	int k = 0;
+	while (*in && k < n - 1) {
+		if (in[0] == '\\' && in[1] == 'x' && isxdigit((unsigned char)in[2]) && isxdigit((unsigned char)in[3])) {
+			char hx[3] = { in[2], in[3], 0 };
+			out[k++] = (char)strtol(hx, NULL, 16);
+			in += 4;
+		} else {
+			out[k++] = *in++;
+		}
+	}
+	out[k] = 0;
+}
+
 static void do_autojoin(Server *s)
 {
 	char list[512];
@@ -770,6 +1392,8 @@ static void do_autojoin(Server *s)
 		if (c->type == CH_CHANNEL && !c->joined && !str_icontains_word(s->cfg.channels, c->name))
 			irc_send_raw(s, "JOIN %s", c->name);
 	}
+	/* channels get theirs once joined */
+	flush_offline(s, NULL);
 }
 
 static void handle_ctcp(Server *s, Line *l, const char *target, char *text)
@@ -783,9 +1407,14 @@ static void handle_ctcp(Server *s, Line *l, const char *target, char *text)
 	if (arg) *arg++ = 0;
 
 	if (!strcmp(text, "ACTION")) {
-		int priv = is_me(s, target);
-		Chan *c = irc_get_chan(s, priv ? l->nick : target, priv ? CH_QUERY : CH_CHANNEL);
-		irc_add_msg(s, c, MT_ACTION, l->nick, arg ? arg : "", 0);
+		int self = is_me(s, l->nick);
+		int chan = is_channel_name(target);
+		if (history_collect(s, MT_ACTION, l->nick, arg ? arg : ""))
+			return;
+		Chan *c = irc_get_chan(s, chan || self ? target : l->nick, chan ? CH_CHANNEL : CH_QUERY);
+		irc_add_msg(s, c, MT_ACTION, l->nick, arg ? arg : "", self);
+	} else if (in_history_batch(s) || is_me(s, l->nick)) {
+		return;                          /* old or my own CTCP requests: no replies */
 	} else if (!strcmp(text, "VERSION")) {
 		irc_send_raw(s, "NOTICE %s :\x01VERSION %s\x01", l->nick, CTCP_VERSION);
 	} else if (!strcmp(text, "PING")) {
@@ -814,27 +1443,39 @@ static void handle_line(Server *s, char *raw)
 		return;
 
 	if (!strcmp(cmd, "PRIVMSG") && l.np >= 2 && l.nick) {
-		const char *target = l.p[0];
+		const char *target = strip_statusmsg(l.p[0]);
 		char *text = l.p[1];
 		if (text[0] == '\x01') {
 			handle_ctcp(s, &l, target, text);
 			return;
 		}
-		int priv = is_me(s, target);
-		if (irc_is_ignored(l.nick) || (priv && pm_flooding(s, l.nick)))
+		/* my own messages come back from a bouncer when sent from another client */
+		int self = is_me(s, l.nick);
+		int chan = is_channel_name(target);
+		if (irc_is_ignored(l.nick))
 			return;
-		Chan *c = irc_get_chan(s, priv ? l.nick : target, priv ? CH_QUERY : CH_CHANNEL);
-		irc_add_msg(s, c, MT_MSG, l.nick, text, 0);
+		if (history_collect(s, MT_MSG, l.nick, text))
+			return;
+		if (!chan && !self && pm_flooding(s, l.nick))
+			return;
+		Chan *c = irc_get_chan(s, chan || self ? target : l.nick, chan ? CH_CHANNEL : CH_QUERY);
+		irc_add_msg(s, c, MT_MSG, l.nick, text, self);
 		return;
 	}
 
 	if (!strcmp(cmd, "NOTICE") && l.np >= 2) {
-		const char *target = l.p[0];
+		const char *target = strip_statusmsg(l.p[0]);
 		if (l.nick && (irc_is_ignored(l.nick) || (is_me(s, target) && s->state == SS_ONLINE && !strchr(l.nick, '.') && pm_flooding(s, l.nick))))
 			return;
 		char *text = l.p[1];
 		if (text[0] == '\x01')       /* CTCP replies */
 			text++;
+		if (l.nick && !strchr(l.nick, '.') && in_history_batch(s)) {
+			char *e = strchr(text, '\x01');
+			if (e) *e = 0;
+			history_collect(s, MT_NOTICE, l.nick, text);
+			return;
+		}
 		Chan *c;
 		if (!l.nick || strchr(l.nick, '.') || s->state != SS_ONLINE)
 			c = s->chans[0];
@@ -862,6 +1503,8 @@ static void handle_line(Server *s, char *raw)
 				s->pending_focus[0] = 0;
 				g_focus_req = 1; g_focus_sidx = s->idx; g_focus_uid = c->uid;
 			}
+			request_latest(s, c);
+			flush_offline(s, c);
 		} else {
 			add_user(s, c, l.nick);
 			irc_sort_users(s, c);
@@ -980,8 +1623,9 @@ static void handle_line(Server *s, char *raw)
 			if (more)
 				return;
 			/* request what we know how to use */
-			static const char *wanted[] = { "server-time", "znc.in/server-time-iso", "multi-prefix", "away-notify", "sasl" };
-			char req[200] = "";
+			static const char *wanted[] = { "server-time", "znc.in/server-time-iso", "multi-prefix", "away-notify",
+			                                "batch", "message-tags", "draft/chathistory", "sasl" };
+			char req[300] = "";
 			for (unsigned i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
 				if (!strcmp(wanted[i], "sasl") && !use_sasl(s))
 					continue;
@@ -1004,7 +1648,20 @@ static void handle_line(Server *s, char *raw)
 			else
 				irc_send_raw(s, "CAP END");
 		} else if (!strcmp(sub, "ACK")) {
-			if (str_icontains_word(last, "sasl") || strstr(last, "sasl")) {
+			char acks[512];
+			int sasl = 0;
+			str_copy(acks, last, sizeof(acks));
+			char *save = NULL;
+			for (char *t = strtok_r(acks, " ", &save); t; t = strtok_r(NULL, " ", &save)) {
+				if (t[0] == '-')
+					continue;
+				if (!strcmp(t, "sasl")) sasl = 1;
+				else if (!strcmp(t, "message-tags")) s->cap_tags = 1;
+				else if (!strcmp(t, "batch")) s->cap_batch = 1;
+				else if (!strcmp(t, "draft/chathistory")) s->cap_history = 1;
+			}
+			s->cap_history = s->cap_history && s->cap_batch;
+			if (sasl) {
 				s->cap_sasl = 1;
 				irc_send_raw(s, "AUTHENTICATE PLAIN");
 			} else if (s->state != SS_ONLINE) {
@@ -1014,6 +1671,42 @@ static void handle_line(Server *s, char *raw)
 			if (s->state != SS_ONLINE)
 				irc_send_raw(s, "CAP END");
 		}
+		return;
+	}
+	if (!strcmp(cmd, "BATCH") && l.np >= 1) {
+		const char *r = l.p[0];
+		if (r[0] == '+' && l.np >= 2)
+			batch_open(s, r + 1, l.p[1], l.np >= 3 ? l.p[2] : "");
+		else if (r[0] == '-')
+			batch_close(s, r + 1);
+		return;
+	}
+	if (!strcmp(cmd, "CHATHISTORY") && l.np >= 2 && !strcmp(l.p[0], "TARGETS")) {
+		const char *t = l.p[1];
+		if (!is_channel_name(t) && !is_me(s, t) && !is_service(t) && !irc_is_ignored(t))
+			request_latest(s, irc_get_chan(s, t, CH_QUERY));
+		return;
+	}
+	if (!strcmp(cmd, "FAIL") && l.np >= 1) {
+		if (!strcmp(l.p[0], "CHATHISTORY")) {
+			for (int i = 0; i < s->nchans; i++)
+				s->chans[i]->hist_req = HR_NONE;
+			g_dirty = 1;
+		} else {
+			status_msg(s, MT_ERROR, "%s", last);
+		}
+		return;
+	}
+	if (!strcmp(cmd, "TAGMSG") && l.np >= 1 && l.nick) {
+		const char *emoji = g_line_react[0] ? g_line_react : g_line_unreact;
+		if (!emoji[0] || !g_line_reply[0] || irc_is_ignored(l.nick))
+			return;
+		int self = is_me(s, l.nick);
+		int chan = is_channel_name(l.p[0]);
+		Chan *c = irc_find_chan(s, chan || self ? l.p[0] : l.nick);
+		Msg *m = c ? irc_find_msgid(c, g_line_reply) : NULL;
+		if (m)
+			react_apply(m, emoji, l.nick, g_line_react[0] != 0, self);
 		return;
 	}
 	if (!strcmp(cmd, "AWAY") && l.nick) {
@@ -1085,6 +1778,21 @@ static void handle_line(Server *s, char *raw)
 				status_msg(s, MT_INFO, T("Recuperando tu nick %s..."), s->cfg.nick);
 			}
 		}
+		/* private conversations that moved while we were away */
+		if (s->cap_history) {
+			int64_t since = 0;
+			for (int i = 0; i < s->nchans; i++) {
+				int64_t t = chan_edge_ts(s->chans[i], 1);
+				if (t > since)
+					since = t;
+			}
+			if (!since)
+				since = unix_ms_now() - 7 * 86400000LL;
+			char a[32], b[32];
+			unix_ms_to_iso(since, a);
+			unix_ms_to_iso(unix_ms_now() + 86400000LL, b);
+			irc_send_raw(s, "CHATHISTORY TARGETS timestamp=%s timestamp=%s %d", a, b, history_limit(s, 50));
+		}
 		ui_toast(T("%s: conectado"), s->cfg.name);
 		return;
 	case 5:
@@ -1093,6 +1801,14 @@ static void handle_line(Server *s, char *raw)
 				char *close = strchr(l.p[i], ')');
 				if (close)
 					str_copy(s->prefixes, close + 1, sizeof(s->prefixes));
+			} else if (!strncmp(l.p[i], "CHATHISTORY=", 12)) {
+				s->history_max = atoi(l.p[i] + 12);
+			} else if (!strncmp(l.p[i], "soju.im/FILEHOST=", 17)) {
+				isupport_unescape(l.p[i] + 17, s->filehost, sizeof(s->filehost));
+				if (strncmp(s->filehost, "https://", 8) && strncmp(s->filehost, "http://", 7))
+					s->filehost[0] = 0;     /* unknown scheme: ignore it */
+				else
+					status_msg(s, MT_INFO, T("Este servidor acepta subidas de imágenes (soju FILEHOST)"));
 			}
 		}
 		return;
@@ -1307,6 +2023,14 @@ static void *server_thread(void *arg)
 		s->caps_ls[0] = 0;
 		s->cap_sasl = 0;
 		s->sasl_ok = 0;
+		s->cap_tags = s->cap_batch = s->cap_history = 0;
+		s->history_max = 0;
+		s->filehost[0] = 0;
+		batches_reset(s);
+		for (int i = 0; i < s->nchans; i++) {
+			s->chans[i]->hist_req = HR_NONE;
+			s->chans[i]->hist_end = 0;
+		}
 		irc_send_raw(s, "CAP LS 302");
 		if (cfg.auth == AUTH_PASS && cfg.password[0])
 			irc_send_raw(s, "PASS %s", cfg.password);
@@ -1349,6 +2073,8 @@ static void *server_thread(void *arg)
 				ping_sent = 0;
 				LOCK();
 				handle_line(s, line);
+				g_line_ts = 0;          /* lines typed in the UI use the local clock */
+				g_line_msgid[0] = 0;
 				UNLOCK();
 				continue;
 			}

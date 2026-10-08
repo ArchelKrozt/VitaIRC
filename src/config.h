@@ -1,12 +1,21 @@
 #ifndef VITAIRC_CONFIG_H
 #define VITAIRC_CONFIG_H
 
-#define APP_VERSION   "1.0"
+#define APP_VERSION   "1.1"
 #define DATA_DIR      "ux0:data/VitaIRC"
 #define CONFIG_PATH   DATA_DIR "/config.ini"
 #define CA_PATH       "app0:cacert.pem"
 
 #define MAX_SERVERS   8
+
+/* GitHub repository checked for new releases ("owner/repo"). */
+#define UPDATE_REPO   "ArchelKrozt/VitaIRC"
+
+/* Image hosting services */
+enum { IMG_LITTERBOX = 0, IMG_IMGBB, IMG_FILEHOST, IMG_IMGUR, IMG_COUNT };
+
+/* Translation services */
+enum { TRP_GOOGLE = 0, TRP_OPENAI, TRP_COUNT };
 
 typedef enum {
 	AUTH_NONE = 0,
@@ -35,14 +44,24 @@ typedef struct {
 	ServerCfg servers[MAX_SERVERS];
 	int  nservers;
 
-	/* ChatGPT translation */
+	/* Translation */
+	int  tr_provider;    /* TRP_* */
 	char openai_key[256];
 	char openai_model[48];
 	char lang_in[8];     /* translate incoming messages to this language */
 	char lang_out[8];    /* translate my messages to this language */
 
-	/* Imgur */
+	/* Images */
+	int  img_host;       /* IMG_* */
 	char imgur_id[64];
+	char imgbb_key[80];
+	int  imgbb_expire;   /* index into the expiration choices, 0 = never */
+	int  litter_time;    /* 0 = 1h, 1 = 12h, 2 = 24h, 3 = 72h */
+
+	/* Updates */
+	int  update_check;   /* look for a new release once a day */
+	char update_repo[80];
+	char update_last[12];/* date of the last automatic check */
 
 	/* misc */
 	int  show_joins;

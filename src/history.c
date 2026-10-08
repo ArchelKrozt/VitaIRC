@@ -65,16 +65,16 @@ void hist_log(Server *s, Chan *c, Msg *m)
 		if (!c->log)
 			return;
 	}
-	SceDateTime t;
-	sceRtcGetCurrentClockLocalTime(&t);
-	/* one line per message; tabs/newlines inside the text are flattened */
+	/* one line per message; tabs/newlines inside the text are flattened.
+	 * date, time, type, self, nick, text, ms since 1970, msgid */
 	char text[1100];
 	str_copy(text, m->text, sizeof(text));
 	for (char *p = text; *p; p++)
 		if (*p == '\t' || *p == '\n' || *p == '\r')
 			*p = ' ';
-	fprintf(c->log, "%04d-%02d-%02d\t%s\t%d\t%d\t%s\t%s\n", t.year, t.month, t.day, m->time,
-	        m->type, m->self, m->nick, text);
+	int ymd = ts_local_ymd(m->ts);
+	fprintf(c->log, "%04d-%02d-%02d\t%s\t%d\t%d\t%s\t%s\t%lld\t%s\n", ymd / 10000, ymd / 100 % 100, ymd % 100,
+	        m->time, m->type, m->self, m->nick, text, (long long)m->ts, m->msgid ? m->msgid : "");
 	fflush(c->log);
 }
 
@@ -162,31 +162,46 @@ void hist_load(Server *s, Chan *c)
 	}
 
 	char last_date[16] = "", last_time[8] = "";
+	int64_t last_ts = 0;
 	g_loading_history = 1;
 	for (int i = 0; i < count; i++) {
 		char *line = lines[(first + i) % HIST_LOAD_LINES];
-		char *f_[6];
+		char *f_[8];
 		int nf = 0;
 		f_[nf++] = line;
-		for (char *q = line; *q && nf < 6; q++)
+		for (char *q = line; *q && nf < 8; q++)
 			if (*q == '\t') {
 				*q = 0;
 				f_[nf++] = q + 1;
 			}
 		if (nf < 6)
 			continue;
-		Msg *m = irc_add_msg(s, c, atoi(f_[2]), f_[4], f_[5], atoi(f_[3]));
-		str_copy(m->time, f_[1], sizeof(m->time));
+		/* logs from 1.0 have no timestamp: rebuild it from the date and time */
+		int64_t ts = nf > 6 ? strtoll(f_[6], NULL, 10) : 0;
+		if (ts <= 0) {
+			int Y = 0, M = 0, D = 0, h = 0, mi = 0;
+			sscanf(f_[0], "%d-%d-%d", &Y, &M, &D);
+			sscanf(f_[1], "%d:%d", &h, &mi);
+			ts = local_to_unix_ms(Y * 10000 + M * 100 + D, h, mi);
+		}
+		g_line_ts = ts;
+		str_copy(g_line_msgid, nf > 7 ? f_[7] : "", sizeof(g_line_msgid));
+		irc_add_msg(s, c, atoi(f_[2]), f_[4], f_[5], atoi(f_[3]));
 		str_copy(last_date, f_[0], sizeof(last_date));
 		str_copy(last_time, f_[1], sizeof(last_time));
+		last_ts = ts;
 	}
 	if (count) {
 		char sep[96];
 		/* "2026-10-03" -> "03/10" */
 		snprintf(sep, sizeof(sep), T("--- historial hasta %.2s/%.2s %s ---"),
 		         last_date + 8, last_date + 5, last_time);
+		g_line_ts = last_ts;
+		g_line_msgid[0] = 0;
 		irc_add_msg(s, c, MT_INFO, NULL, sep, 0);
 	}
+	g_line_ts = 0;
+	g_line_msgid[0] = 0;
 	g_loading_history = 0;
 	c->unread = 0;
 	c->mention = 0;
@@ -208,7 +223,8 @@ void session_save(void)
 		Server *s = &g_servers[i];
 		for (int k = 1; k < s->nchans; k++) {
 			Chan *c = s->chans[k];
-			fprintf(f, "%s\t%d\t%d\t%d\t%s\t%s\n", g_cfg.servers[i].host, c->type, c->trans_in, c->trans_out, c->name, c->trans_lang);
+			fprintf(f, "%s\t%d\t%d\t%d\t%s\t%s\t%d\n", g_cfg.servers[i].host, c->type, c->trans_in, c->trans_out,
+			        c->name, c->trans_lang, c->muted);
 		}
 	}
 	fclose(f);
@@ -223,10 +239,10 @@ void session_restore(void)
 	restoring = 1;
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
-		char *fld[6];
+		char *fld[7];
 		int nf = 0;
 		fld[nf++] = line;
-		for (char *q = line; *q && nf < 6; q++)
+		for (char *q = line; *q && nf < 7; q++)
 			if (*q == '\t') {
 				*q = 0;
 				fld[nf++] = q + 1;
@@ -244,6 +260,8 @@ void session_restore(void)
 		c->trans_out = atoi(fld[3]);
 		if (nf > 5)
 			str_copy(c->trans_lang, fld[5], sizeof(c->trans_lang));
+		if (nf > 6)
+			c->muted = atoi(fld[6]);
 	}
 	restoring = 0;
 	fclose(f);

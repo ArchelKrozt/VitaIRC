@@ -52,6 +52,11 @@ void config_server_defaults(ServerCfg *s)
 void config_defaults(void)
 {
 	memset(&g_cfg, 0, sizeof(g_cfg));
+	g_cfg.tr_provider = -1;          /* decided after loading (see config_load) */
+	g_cfg.img_host = -1;
+	g_cfg.litter_time = 3;
+	g_cfg.update_check = 1;
+	strcpy(g_cfg.update_repo, UPDATE_REPO);
 	strcpy(g_cfg.openai_model, "gpt-4o-mini");
 	strcpy(g_cfg.lang_in, "es");
 	strcpy(g_cfg.lang_out, "en");
@@ -72,6 +77,14 @@ static void apply_general(const char *k, const char *v)
 	else if (!strcmp(k, "lang_in"))      SETS(g_cfg.lang_in, v);
 	else if (!strcmp(k, "lang_out"))     SETS(g_cfg.lang_out, v);
 	else if (!strcmp(k, "imgur_client_id")) SETS(g_cfg.imgur_id, v);
+	else if (!strcmp(k, "translator"))   g_cfg.tr_provider = atoi(v);
+	else if (!strcmp(k, "image_host"))   g_cfg.img_host = atoi(v);
+	else if (!strcmp(k, "imgbb_key"))    SETS(g_cfg.imgbb_key, v);
+	else if (!strcmp(k, "imgbb_expire")) g_cfg.imgbb_expire = atoi(v);
+	else if (!strcmp(k, "litterbox_time")) g_cfg.litter_time = atoi(v);
+	else if (!strcmp(k, "update_check")) g_cfg.update_check = atoi(v);
+	else if (!strcmp(k, "update_repo"))  SETS(g_cfg.update_repo, v);
+	else if (!strcmp(k, "update_last"))  SETS(g_cfg.update_last, v);
 	else if (!strcmp(k, "show_joins"))   g_cfg.show_joins = atoi(v);
 	else if (!strcmp(k, "keep_awake"))   g_cfg.keep_awake = atoi(v);
 	else if (!strcmp(k, "cpu_mhz"))      g_cfg.cpu_mhz = atoi(v);
@@ -108,6 +121,8 @@ void config_load(void)
 	if (!f) {
 		config_server_defaults(&g_cfg.servers[0]);
 		g_cfg.nservers = 1;
+		g_cfg.tr_provider = TRP_GOOGLE;
+		g_cfg.img_host = IMG_LITTERBOX;
 		config_save();
 		return;
 	}
@@ -142,6 +157,18 @@ void config_load(void)
 	}
 	fclose(f);
 
+	/* configs from 1.0: keep ChatGPT / Imgur when they were already set up */
+	if (g_cfg.tr_provider < 0 || g_cfg.tr_provider >= TRP_COUNT)
+		g_cfg.tr_provider = g_cfg.openai_key[0] ? TRP_OPENAI : TRP_GOOGLE;
+	if (g_cfg.img_host < 0 || g_cfg.img_host >= IMG_COUNT)
+		g_cfg.img_host = g_cfg.imgur_id[0] ? IMG_IMGUR : IMG_LITTERBOX;
+	/* a placeholder saved by an older build follows the compiled-in default */
+	if (!g_cfg.update_repo[0] || !strncmp(g_cfg.update_repo, "YOUR_", 5))
+		strcpy(g_cfg.update_repo, UPDATE_REPO);
+	if (g_cfg.litter_time < 0 || g_cfg.litter_time > 3)
+		g_cfg.litter_time = 3;
+	if (g_cfg.imgbb_expire < 0 || g_cfg.imgbb_expire > 4)
+		g_cfg.imgbb_expire = 0;
 	if (g_cfg.cpu_mhz != 222 && g_cfg.cpu_mhz != 333 && g_cfg.cpu_mhz != 444)
 		g_cfg.cpu_mhz = 333;
 	if (g_cfg.font_pct < 70 || g_cfg.font_pct > 150)
@@ -155,11 +182,19 @@ int config_save(void)
 		return -1;
 	fprintf(f, "; VitaIRC configuration. Can also be edited with VitaShell.\n");
 	fprintf(f, "[general]\n");
+	fprintf(f, "translator=%d\n", g_cfg.tr_provider);
 	fprintf(f, "openai_key=%s\n", g_cfg.openai_key);
 	fprintf(f, "openai_model=%s\n", g_cfg.openai_model);
 	fprintf(f, "lang_in=%s\n", g_cfg.lang_in);
 	fprintf(f, "lang_out=%s\n", g_cfg.lang_out);
+	fprintf(f, "image_host=%d\n", g_cfg.img_host);
 	fprintf(f, "imgur_client_id=%s\n", g_cfg.imgur_id);
+	fprintf(f, "imgbb_key=%s\n", g_cfg.imgbb_key);
+	fprintf(f, "imgbb_expire=%d\n", g_cfg.imgbb_expire);
+	fprintf(f, "litterbox_time=%d\n", g_cfg.litter_time);
+	fprintf(f, "update_check=%d\n", g_cfg.update_check);
+	fprintf(f, "update_repo=%s\n", g_cfg.update_repo);
+	fprintf(f, "update_last=%s\n", g_cfg.update_last);
 	fprintf(f, "show_joins=%d\n", g_cfg.show_joins);
 	fprintf(f, "keep_awake=%d\n", g_cfg.keep_awake);
 	fprintf(f, "cpu_mhz=%d\n", g_cfg.cpu_mhz);

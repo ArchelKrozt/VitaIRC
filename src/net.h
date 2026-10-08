@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* HTTP worker: ChatGPT translations and Imgur uploads run here so the
+/* HTTP worker: translations, image uploads and downloads run here so the
  * UI and IRC threads never block on HTTPS. */
 void net_init(void);
 void net_shutdown(void);
@@ -12,8 +12,25 @@ void net_shutdown(void);
 void tr_request_in(int sidx, uint32_t chan_uid, uint32_t msg_id, const char *text, const char *lang);
 /* Translate my message and send it to the channel when done. */
 void tr_request_out(int sidx, uint32_t chan_uid, const char *text);
-/* Upload an image to Imgur; on success the UI opens the keyboard with the link. */
+/* Upload an image with the configured service; on success the UI opens the
+ * keyboard with the link. */
 void img_upload_request(int sidx, uint32_t chan_uid, const char *path);
+/* Display name of an image service (IMG_*) */
+const char *img_host_name(int host);
+/* 1 when uploads can work from this server's windows; otherwise why (for a toast). */
+int  img_host_ready(int sidx, char *why, int n);
+
+/* Translation is configured (the free service needs nothing). */
+int  tr_ready(void);
+const char *tr_provider_name(int p);
+
+/* Looks for a newer release on GitHub (manual = report "up to date" too). */
+void update_check_request(int manual);
+/* Result, consumed by the UI (protected by g_lock): 1 = newer release, 2 = up to date, -1 = error */
+extern int  g_update_done;
+extern char g_update_tag[32];
+extern char g_update_url[200];
+extern char g_update_err[120];
 
 /* Downloads an image for the in-app viewer. */
 void img_fetch_request(const char *url);

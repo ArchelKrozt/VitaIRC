@@ -43,4 +43,19 @@ void   time_hhmm(char out[6]);
 int    iso_to_local_hhmm(const char *iso, char out[6]);
 uint64_t now_ms(void);
 
+/* Wall-clock timestamps: milliseconds since 1970-01-01 UTC. */
+int64_t unix_ms_now(void);
+/* "2026-10-03T18:13:00.000Z" -> ms. Returns 0 on success. */
+int    iso_to_unix_ms(const char *iso, int64_t *out);
+/* ms -> "2026-10-03T18:13:00.000Z" */
+void   unix_ms_to_iso(int64_t ms, char out[32]);
+/* Local time of a timestamp */
+void   ts_local_hhmm(int64_t ms, char out[6]);
+int    ts_local_ymd(int64_t ms);            /* 20261003 */
+int    ts_local_weekday(int64_t ms);        /* 0 = Sunday */
+/* Local date (20261003) and time -> ms */
+int64_t local_to_unix_ms(int ymd, int hour, int minute);
+/* Days between two yyyymmdd dates (b - a) */
+int    ymd_diff_days(int a, int b);
+
 #endif

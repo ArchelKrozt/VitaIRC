@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1
+
+- **Free translation** with Google (no key needed); ChatGPT stays available as an option.
+- **Image services**: Litterbox (default, no account), ImgBB (with expiration and delete links),
+  Imgur, and **soju FILEHOST** (upload to your own bouncer). Upload progress in the top bar.
+- **My recent uploads**: resend old links or delete ImgBB images.
+- **IRCv3 chathistory**: missed messages from soju (or any server with `draft/chathistory`) for
+  channels and private chats, and older messages when scrolling past the top.
+- **Reactions** (`+draft/react` / `+draft/unreact`) shown under each message.
+- **Emoji** drawn with a bundled monochrome font (Noto Emoji).
+- **Day separators** (Today / Yesterday / date), nick completion with `@`, per-channel **mute**,
+  **offline queue** (messages typed while disconnected are sent after reconnecting) and a daily
+  **update check** against GitHub Releases.
+- Fixed: a mention at the very end of a message ("hi nick") did not highlight.
+- Fixed: messages replayed by a bouncer were logged with the day they arrived instead of their own.
+- Fixed: messages sent from another client of the same bouncer opened a channel-like window.
+- Messages to channel operators (`@#channel`) go to the channel window.
+
 ## 1.0 — first release
 
 - Native IRC client for PS Vita: multiple networks, SSL/TLS, NickServ / SASL PLAIN / server password.

@@ -1,0 +1,47 @@
+name: Build VPK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VITASDK: /usr/local/vitasdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install VitaSDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+          sudo mkdir -p "$VITASDK"
+          sudo chown "$USER" "$VITASDK"
+          curl -fsSL https://raw.githubusercontent.com/vitasdk/vdpm/master/bootstrap-vitasdk.sh -o bootstrap-vitasdk.sh
+          bash bootstrap-vitasdk.sh
+          echo "$VITASDK/bin" >> "$GITHUB_PATH"
+
+      - name: Install libraries
+        run: yes | vdpm install libvita2d freetype curl-mbedtls mbedtls zlib libpng
+
+      - name: Build
+        run: ./build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VitaIRC
+          path: dist/VitaIRC.vpk
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/VitaIRC.vpk
+          generate_release_notes: true

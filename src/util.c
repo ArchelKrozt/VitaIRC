@@ -48,7 +48,7 @@ int str_icmp(const char *a, const char *b)
 
 static int is_nick_char(char c)
 {
-	return isalnum((unsigned char)c) || strchr("[]\\`_^{|}-", c);
+	return c && (isalnum((unsigned char)c) || strchr("[]\\`_^{|}-", c));
 }
 
 int str_icontains_word(const char *hay, const char *needle)
@@ -258,6 +258,116 @@ static long days_from_civil(int y, int m, int d)
 static long dt_minutes(const SceDateTime *t)
 {
 	return days_from_civil(t->year, t->month, t->day) * 1440 + t->hour * 60 + t->minute;
+}
+
+static void civil_from_days(long z, int *y, int *m, int *d)
+{
+	z += 719468;
+	long era = (z >= 0 ? z : z - 146096) / 146097;
+	long doe = z - era * 146097;
+	long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	long mp = (5 * doy + 2) / 153;
+	*d = doy - (153 * mp + 2) / 5 + 1;
+	*m = mp < 10 ? mp + 3 : mp - 9;
+	*y = yoe + era * 400 + (*m <= 2);
+}
+
+/* Minutes to add to UTC to get local time (refreshed once a minute). */
+static long utc_offset_min(void)
+{
+	static long offset;
+	static uint64_t at;
+	uint64_t now = now_ms();
+	if (!at || now - at > 60000) {
+		SceDateTime loc, utc;
+		sceRtcGetCurrentClockLocalTime(&loc);
+		sceRtcGetCurrentClock(&utc, 0);
+		long d = dt_minutes(&loc) - dt_minutes(&utc);
+		/* round to a quarter hour: both clocks may straddle a minute */
+		offset = (d >= 0 ? d + 7 : d - 7) / 15 * 15;
+		at = now;
+	}
+	return offset;
+}
+
+int64_t unix_ms_now(void)
+{
+	SceDateTime u;
+	sceRtcGetCurrentClock(&u, 0);
+	return ((int64_t)days_from_civil(u.year, u.month, u.day) * 86400 + u.hour * 3600 + u.minute * 60 + u.second) * 1000
+	       + u.microsecond / 1000;
+}
+
+int iso_to_unix_ms(const char *iso, int64_t *out)
+{
+	int Y, M, D, h, m, sec = 0, n = 0;
+	if (sscanf(iso, "%4d-%2d-%2dT%2d:%2d%n", &Y, &M, &D, &h, &m, &n) != 5)
+		return -1;
+	const char *p = iso + n;
+	int ms = 0;
+	if (*p == ':') {
+		p++;
+		sec = atoi(p);
+		while (isdigit((unsigned char)*p)) p++;
+		if (*p == '.') {
+			int scale = 100;
+			for (p++; isdigit((unsigned char)*p); p++) {
+				ms += (*p - '0') * scale;
+				scale /= 10;
+			}
+		}
+	}
+	*out = ((int64_t)days_from_civil(Y, M, D) * 86400 + h * 3600 + m * 60 + sec) * 1000 + ms;
+	return 0;
+}
+
+void unix_ms_to_iso(int64_t ms, char out[32])
+{
+	int64_t secs = ms / 1000;
+	long days = (long)(secs / 86400);
+	long rem = (long)(secs % 86400);
+	int y, mo, d;
+	civil_from_days(days, &y, &mo, &d);
+	snprintf(out, 32, "%04d-%02d-%02dT%02ld:%02ld:%02ld.%03dZ", y, mo, d, rem / 3600, rem / 60 % 60, rem % 60, (int)(ms % 1000));
+}
+
+static int64_t local_minutes(int64_t ms)
+{
+	return ms / 60000 + utc_offset_min();
+}
+
+void ts_local_hhmm(int64_t ms, char out[6])
+{
+	long mins = (long)(((local_minutes(ms) % 1440) + 1440) % 1440);
+	snprintf(out, 6, "%02ld:%02ld", mins / 60, mins % 60);
+}
+
+int ts_local_ymd(int64_t ms)
+{
+	int64_t lm = local_minutes(ms);
+	long days = (long)(lm >= 0 ? lm / 1440 : (lm - 1439) / 1440);
+	int y, m, d;
+	civil_from_days(days, &y, &m, &d);
+	return y * 10000 + m * 100 + d;
+}
+
+int ts_local_weekday(int64_t ms)
+{
+	int64_t lm = local_minutes(ms);
+	long days = (long)(lm >= 0 ? lm / 1440 : (lm - 1439) / 1440);
+	return (int)(((days % 7) + 11) % 7);   /* 1970-01-01 was a Thursday */
+}
+
+int64_t local_to_unix_ms(int ymd, int hour, int minute)
+{
+	long days = days_from_civil(ymd / 10000, ymd / 100 % 100, ymd % 100);
+	return ((int64_t)days * 1440 + hour * 60 + minute - utc_offset_min()) * 60000;
+}
+
+int ymd_diff_days(int a, int b)
+{
+	return (int)(days_from_civil(b / 10000, b / 100 % 100, b % 100) - days_from_civil(a / 10000, a / 100 % 100, a % 100));
 }
 
 int iso_to_local_hhmm(const char *iso, char out[6])
