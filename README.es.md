@@ -59,6 +59,14 @@ a la escena de la Vita y es de código abierto.
 - **Visor de imágenes** integrado (PNG/JPG con zoom); el resto de enlaces se abre en el navegador.
 - Interfaz en **español e inglés**, controles físicos y pantalla táctil.
 
+## Vista previa de enlaces y videos
+
+Si un mensaje trae un enlace, VitaIRC muestra debajo una vista previa: **miniatura** para imágenes,
+**tarjeta** con título, descripción e imagen para páginas web y YouTube, y **▶ video** para enlaces
+MP4, que se **reproducen dentro de la app** (✕ pausa, L/R ±10 s, ○ cerrar). La Vita reproduce MP4
+con H.264 y AAC; GIF, WebM y YouTube se abren en el navegador. Se desactiva en *Ajustes → Vista
+previa de enlaces* (las páginas ven tu IP al cargar la vista previa).
+
 ## Buscador de imágenes
 
 **△ → Imágenes... → Buscar imágenes**, con etiquetas en inglés (`scenery`, `cat_ears sky`...).

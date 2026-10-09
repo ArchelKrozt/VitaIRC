@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaIRC")
 set(VITA_TITLEID  "VIRC00001")
-set(VITA_VERSION  "01.20")
+set(VITA_VERSION  "01.30")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-format-truncation -Wno-stringop-truncation")
 
@@ -42,6 +42,9 @@ add_executable(${PROJECT_NAME}
   src/sound.c
   src/booru.c
   src/imgutil.c
+  src/httpc.c
+  src/preview.c
+  src/video.c
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -70,6 +73,7 @@ target_link_libraries(${PROJECT_NAME}
   SceAppUtil_stub
   SceAppMgr_stub
   SceCamera_stub
+  SceAvPlayer_stub
   SceAudio_stub
   SceSysmodule_stub
   SceNet_stub

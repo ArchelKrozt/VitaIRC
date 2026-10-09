@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3
+
+- **Link previews** under messages: image thumbnails, page cards (title, description and picture
+  from `og:` tags), YouTube cards (oEmbed), video and GIF cards. Tap to open.
+- **Built-in MP4 player** (hardware decoder): pause, ±10 s, open in the browser.
+- The viewer decodes big photos at reduced size; WebP everywhere.
+- Setting to turn link previews off.
+
 ## 1.2
 
 - **Image search** on Safebooru, Danbooru and Sankaku: thumbnail grid, pages, open in the viewer,

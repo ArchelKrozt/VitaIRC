@@ -39,6 +39,9 @@
 #include "history.h"
 #include "booru.h"
 #include "imgutil.h"
+#include "httpc.h"
+#include "preview.h"
+#include "video.h"
 
 #define SCR_W 960
 #define SCR_H 544
@@ -514,7 +517,7 @@ static void ime_open(int kind, const char *title, const char *initial, int maxle
 /* ------------------------------------------------------------------ */
 /* UI state                                                           */
 /* ------------------------------------------------------------------ */
-enum { SCR_CHAT, SCR_SERVERS, SCR_EDIT, SCR_SETTINGS, SCR_USERS, SCR_CHANLIST, SCR_FILES, SCR_HELP, SCR_IMAGE, SCR_CAMERA, SCR_BOORU };
+enum { SCR_CHAT, SCR_SERVERS, SCR_EDIT, SCR_SETTINGS, SCR_USERS, SCR_CHANLIST, SCR_FILES, SCR_HELP, SCR_IMAGE, SCR_CAMERA, SCR_BOORU, SCR_VIDEO };
 
 static int screen = SCR_CHAT;
 static int list_sel, list_top;
@@ -554,7 +557,19 @@ static uint32_t draft_uid;
 /* lines drawn in the chat view, for touch hit-testing */
 static int      vis_y[64];
 static uint32_t vis_id[64];
+static int      vis_line[64];
 static int      nvis;
+
+/* link previews */
+#define PV_IMG_LINES  5
+#define PV_CARD_LINES 3
+static uint16_t lay_gen;          /* bumped when previews change size */
+static uint32_t pv_drawn;         /* message whose preview was drawn this frame */
+
+/* video player */
+static int      vid_return;
+static char     vid_url[300];
+static uint64_t vid_osd_until;
 
 /* image viewer */
 static vita2d_texture *iv_tex;
@@ -746,6 +761,26 @@ static void msg_prefix(Msg *m, char *out, int n)
 	}
 }
 
+static int extract_urls(const char *text, char out[][300], int max, int n);
+
+/* Lines of the preview for the first link of a message (0 = none); url gets the link. */
+static int msg_preview(Msg *m, char *url, int n)
+{
+	if (!g_cfg.link_previews || m->pending || !(m->type == MT_MSG || m->type == MT_ACTION || m->type == MT_NOTICE))
+		return 0;
+	char urls[1][300];
+	if (extract_urls(m->text, urls, 1, 0) < 1)
+		return 0;
+	str_copy(url, urls[0], n);
+	Preview *p = pv_find(url);
+	if (p && p->state == PS_FAIL)
+		return 0;
+	int kind = p ? p->kind : pv_kind_of(url);
+	if (kind == PK_IMAGE)
+		return p && p->gif ? 2 : PV_IMG_LINES;
+	return PV_CARD_LINES;
+}
+
 static int wrap(const char *t, int first_w, int rest_w, uint16_t *br, int nbr, int base)
 {
 	int lines = 0;
@@ -785,8 +820,9 @@ static int wrap(const char *t, int first_w, int rest_w, uint16_t *br, int nbr, i
 
 static void msg_layout(Msg *m, int width)
 {
-	if (m->lay_w == width && m->lay_breaks)
+	if (m->lay_w == width && m->lay_gen == lay_gen && m->lay_breaks)
 		return;
+	m->lay_gen = lay_gen;
 	if (!m->lay_breaks)
 		m->lay_breaks = malloc(MAX_BREAKS * sizeof(uint16_t));
 	if (!m->lay_breaks) {
@@ -813,6 +849,9 @@ static void msg_layout(Msg *m, int width)
 	} else if (m->trans_state == TR_PENDING) {
 		n += 1;
 	}
+	char url[300];
+	m->lay_pv = msg_preview(m, url, sizeof(url));
+	n += m->lay_pv;
 	if (m->reacts && m->reacts->n)
 		n += 1;                     /* reactions row */
 	m->lay_lines = n;
@@ -917,6 +956,76 @@ static void draw_reacts(Msg *m, int x, int top)
 	}
 }
 
+static void draw_preview(Msg *m, int x, int top, int w, int lines)
+{
+	char url[300];
+	if (!msg_preview(m, url, sizeof(url)))
+		return;
+	Preview *p = pv_get(url);
+	if (!p)
+		return;
+	int y = top + 2, h = lines * lh - 4;
+	if (p->kind == PK_IMAGE && !p->gif) {
+		if (p->tex) {
+			float tw = vita2d_texture_get_width(p->tex), th = vita2d_texture_get_height(p->tex);
+			float sc = h / th;
+			if (tw * sc > 320) sc = 320 / tw;
+			if (sc > 1.5f) sc = 1.5f;
+			vita2d_draw_texture_scale(p->tex, x, y, sc, sc);
+			draw_rect_outline(x, y, (int)(tw * sc), (int)(th * sc), C_LINE);
+		} else {
+			const char *t = p->state == PS_READY ? T("toca para ver la imagen") : T("cargando imagen...");
+			vita2d_draw_rectangle(x, y, 240, h, C_PANEL);
+			draw_text(x + 10, y + (h - lh) / 2, C_FAINT, t);
+		}
+		return;
+	}
+	int cw = w < 640 ? w : 640;
+	int video = p->kind == PK_VIDEO || p->video_site;
+	vita2d_draw_rectangle(x, y, cw, h, C_PANEL);
+	vita2d_draw_rectangle(x, y, 3, h, video ? C_ERR : C_ACCENT);
+	int tx = x + 12;
+	if (p->tex) {
+		float tw = vita2d_texture_get_width(p->tex), th = vita2d_texture_get_height(p->tex);
+		float sc = (h - 8) / th;
+		if (tw * sc > (h - 8) * 1.8f) sc = (h - 8) * 1.8f / tw;
+		vita2d_draw_texture_scale(p->tex, x + 8, y + 4, sc, sc);
+		if (video) {
+			int cx = x + 8 + (int)(tw * sc) / 2, cy = y + h / 2;
+			vita2d_draw_fill_circle(cx, cy, lh * 0.7f, RGBA8(0, 0, 0, 0xa0));
+			draw_text(cx - text_w("▶") / 2 + 1, cy - lh / 2, C_TEXT, "▶");
+		}
+		tx = x + 8 + (int)(tw * sc) + 10;
+	}
+	char l1[200], l2[200];
+	const char *l3 = p->site;
+	if (p->state == PS_LOADING || p->state == PS_NONE) {
+		snprintf(l1, sizeof(l1), "%s", url);
+		snprintf(l2, sizeof(l2), "%s", T("cargando vista previa..."));
+		l3 = "";
+	} else if (p->kind == PK_VIDEO) {
+		snprintf(l1, sizeof(l1), "▶ %s", p->title);
+		if (!p->playable)
+			snprintf(l2, sizeof(l2), "%s", T("formato no compatible: toca para abrir en el navegador"));
+		else if (p->size > 0)
+			snprintf(l2, sizeof(l2), T("Video MP4 · %.1f MB · toca para reproducir"), p->size / 1048576.0);
+		else
+			snprintf(l2, sizeof(l2), "%s", T("Video MP4 · toca para reproducir"));
+	} else if (p->gif) {
+		snprintf(l1, sizeof(l1), "GIF · %s", T("toca para abrir en el navegador"));
+		l2[0] = 0;
+	} else {
+		snprintf(l1, sizeof(l1), "%s", p->title[0] ? p->title : url);
+		snprintf(l2, sizeof(l2), "%s", p->desc);
+	}
+	int tw2 = x + cw - tx - 8;
+	draw_text_fit(tx, top, tw2, C_TEXT, l1);
+	if (lines > 1 && l2[0])
+		draw_text_fit(tx, top + lh, tw2, C_DIM, l2);
+	if (lines > 2 && l3[0])
+		draw_text_fit(tx, top + 2 * lh, tw2, C_FAINT, l3);
+}
+
 static void draw_msg_line(Msg *m, int line, int x, int top, int width)
 {
 	int tw = time_w();
@@ -932,6 +1041,15 @@ static void draw_msg_line(Msg *m, int line, int x, int top, int width)
 	}
 	if (m->reacts && m->reacts->n && line == m->lay_lines - 1) {
 		draw_reacts(m, x + tw, top);
+		return;
+	}
+	int pv_first = m->lay_lines - (m->reacts && m->reacts->n ? 1 : 0) - m->lay_pv;
+	if (m->lay_pv && line >= pv_first) {
+		/* the whole block is drawn once, from whichever of its lines comes first */
+		if (pv_drawn != m->id) {
+			pv_drawn = m->id;
+			draw_preview(m, x + tw, top - (line - pv_first) * lh, width - tw, m->lay_pv);
+		}
 		return;
 	}
 	if (jump_id == m->id && now_ms() < jump_until && g_view_uid == jump_uid)
@@ -959,7 +1077,7 @@ static void draw_msg_line(Msg *m, int line, int x, int top, int width)
 	} else if (m->trans) {
 		int li = line - m->lay_text_lines;
 		int base = m->lay_text_lines;
-		int end = m->lay_lines - (m->reacts && m->reacts->n ? 1 : 0);
+		int end = m->lay_lines - (m->reacts && m->reacts->n ? 1 : 0) - m->lay_pv;
 		int from = m->lay_breaks[base + li];
 		int to = (base + li + 1 < end) ? m->lay_breaks[base + li + 1] : (int)strlen(m->trans);
 		int ax = x + tw;
@@ -1038,6 +1156,7 @@ static void draw_chat(Chan *c)
 	vita2d_enable_clipping();
 	int y = bottom - (bottom - top) % lh;   /* align so lines fit exactly */
 	nvis = 0;
+	pv_drawn = 0;
 	int skip = c->scroll;
 	for (int i = c->count - 1; i >= 0 && y > top - lh; i--) {
 		Msg *m = irc_msg_at(c, i);
@@ -1052,6 +1171,7 @@ static void draw_chat(Chan *c)
 			if (nvis < 64) {
 				vis_y[nvis] = y;
 				vis_id[nvis] = m->id;
+				vis_line[nvis] = ln;
 				nvis++;
 			}
 		}
@@ -1361,28 +1481,7 @@ static int extract_urls(const char *text, char out[][300], int max, int n)
 /* Returns 1 and a direct image URL when the link can be shown in the viewer. */
 static int image_url(const char *url, char *direct, int n)
 {
-	const char *host = strstr(url, "://");
-	host = host ? host + 3 : url;
-	char path[300];
-	str_copy(path, url, sizeof(path));
-	path[strcspn(path, "?#")] = 0;
-	const char *ext = strrchr(path, '.');
-	if (ext && ext > strrchr(path, '/') && (!strcasecmp(ext, ".png") || !strcasecmp(ext, ".jpg") || !strcasecmp(ext, ".jpeg") || !strcasecmp(ext, ".webp"))) {
-		str_copy(direct, url, n);
-		return 1;
-	}
-	/* imgur.com/<id>  ->  i.imgur.com/<id>.jpg (albums and galleries open in the browser) */
-	if (!strncmp(host, "imgur.com/", 10) || !strncmp(host, "www.imgur.com/", 14) || !strncmp(host, "m.imgur.com/", 12)) {
-		const char *id = strchr(host, '/') + 1;
-		if (!strncmp(id, "a/", 2) || !strncmp(id, "gallery/", 8) || !strncmp(id, "t/", 2) || !*id)
-			return 0;
-		char idb[64];
-		str_copy(idb, id, sizeof(idb));
-		idb[strcspn(idb, "/?#.")] = 0;
-		snprintf(direct, n, "https://i.imgur.com/%s.jpg", idb);
-		return 1;
-	}
-	return 0;
+	return pv_image_url(url, direct, n);
 }
 
 static void open_browser(const char *url)
@@ -1815,6 +1914,32 @@ static void open_viewer_booru(const BPost *p)
 	screen = SCR_IMAGE;
 }
 
+static void open_video(const char *url)
+{
+	char direct[400];
+	pv_video_url(url, direct, sizeof(direct));
+	str_copy(vid_url, url, sizeof(vid_url));
+	video_open(direct);
+	if (screen != SCR_VIDEO)
+		vid_return = screen;
+	vid_osd_until = now_ms() + 3000;
+	screen = SCR_VIDEO;
+}
+
+/* Opens a link the best way the app can: viewer, player or browser. */
+static void open_link(const char *url)
+{
+	char direct[400];
+	Preview *p = pv_find(url);
+	int kind = p ? p->kind : pv_kind_of(url);
+	if (kind == PK_VIDEO && (p ? p->playable : !strstr(url, ".webm")))
+		open_video(p && p->media[0] ? p->media : url);
+	else if (kind == PK_IMAGE && !(p && p->gif) && (image_url(url, direct, sizeof(direct)) || (p && p->media[0])))
+		open_viewer_url(image_url(url, direct, sizeof(direct)) ? direct : p->media, url);
+	else
+		open_browser(url);
+}
+
 static void open_viewer_file(const char *path)
 {
 	iv_free();
@@ -2174,14 +2299,9 @@ static void do_action(int a)
 			}
 		}
 		break;
-	case A_URL: {
-		char direct[300];
-		if (image_url(ctx_urls[menu_arg], direct, sizeof(direct)))
-			open_viewer_url(direct, ctx_urls[menu_arg]);
-		else
-			open_browser(ctx_urls[menu_arg]);
+	case A_URL:
+		open_link(ctx_urls[menu_arg]);
 		break;
-	}
 	case A_LINKS:
 		open_links();
 		break;
@@ -2526,7 +2646,15 @@ static void chat_input(void)
 		} else if (touch_tap_x > SIDE_W && touch_tap_y >= chat_top() && touch_tap_y < chat_bottom()) {
 			for (int i = 0; i < nvis; i++)
 				if (touch_tap_y >= vis_y[i] && touch_tap_y < vis_y[i] + lh) {
-					open_msg_menu(c, vis_id[i]);
+					/* a tap on a preview opens it; elsewhere, the message menu */
+					Msg *m = irc_find_msg(c, vis_id[i]);
+					char url[300];
+					int pv_first = m ? m->lay_lines - (m->reacts && m->reacts->n ? 1 : 0) - m->lay_pv : 0;
+					if (m && m->lay_pv && vis_line[i] >= pv_first && vis_line[i] < pv_first + m->lay_pv &&
+					    msg_preview(m, url, sizeof(url)))
+						open_link(url);
+					else
+						open_msg_menu(c, vis_id[i]);
 					break;
 				}
 		}
@@ -2795,7 +2923,7 @@ static void draw_edit_screen(void)
 /* Settings                                                           */
 /* ------------------------------------------------------------------ */
 enum { S_TRPROV, S_KEY, S_MODEL, S_LANG_IN, S_LANG_OUT, S_USAGE, S_IMGHOST, S_IMGEXP, S_IMGBB, S_IMGUR,
-       S_ADULT, S_SKUSER, S_SKPASS,
+       S_PREVIEWS, S_ADULT, S_SKUSER, S_SKPASS,
        S_HIGHLIGHT, S_IGNORE, S_SOUND, S_COLORS, S_JOINS, S_AWAKE, S_CPU, S_FONT, S_UILANG, S_UPDATE, S_ABOUT, S_COUNT };
 
 static const char *litter_names[] = { "1 hora", "12 horas", "24 horas", "72 horas" };
@@ -2835,6 +2963,10 @@ static void settings_label(int f, char *label, char *value, int n)
 			snprintf(value, n, "< %s >", T(imgbb_exp_names[g_cfg.imgbb_expire]));
 		else
 			snprintf(value, n, T("(lo decide el servicio)"));
+		break;
+	case S_PREVIEWS:
+		strcpy(label, T("Vista previa de enlaces"));
+		snprintf(value, n, "%s", g_cfg.link_previews ? T("Sí (imágenes, videos y páginas)") : "No");
 		break;
 	case S_ADULT:
 		strcpy(label, T("Búsqueda: contenido adulto"));
@@ -2973,6 +3105,11 @@ static void settings_input(void)
 		case S_KEY:   ime.field = g_cfg.openai_key; ime.fieldlen = sizeof(g_cfg.openai_key); ime_open(IME_FIELD, T("API key de OpenAI (sk-...)"), g_cfg.openai_key, 250, 0, 0); break;
 		case S_MODEL: ime.field = g_cfg.openai_model; ime.fieldlen = sizeof(g_cfg.openai_model); ime_open(IME_FIELD, T("Modelo (ej: gpt-4o-mini)"), g_cfg.openai_model, 46, 0, 0); break;
 		case S_IMGUR: ime.field = g_cfg.imgur_id; ime.fieldlen = sizeof(g_cfg.imgur_id); ime_open(IME_FIELD, T("Client-ID de Imgur"), g_cfg.imgur_id, 60, 0, 0); break;
+		case S_PREVIEWS:
+			g_cfg.link_previews = !g_cfg.link_previews;
+			lay_gen++;
+			changed = 1;
+			break;
 		case S_ADULT:
 			if (g_cfg.booru_adult) {
 				g_cfg.booru_adult = 0;
@@ -3521,6 +3658,81 @@ static void draw_booru_screen(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Video player                                                       */
+/* ------------------------------------------------------------------ */
+static void video_input(void)
+{
+	if (PRESSED(btn_back)) {
+		video_close();
+		screen = vid_return;
+		return;
+	}
+	if (PRESSED(btn_ok) || touch_tap)
+		video_toggle_pause();
+	if (REPEAT(SCE_CTRL_LEFT) || REPEAT(SCE_CTRL_LTRIGGER))
+		video_seek(-10);
+	if (REPEAT(SCE_CTRL_RIGHT) || REPEAT(SCE_CTRL_RTRIGGER))
+		video_seek(10);
+	if (PRESSED(SCE_CTRL_TRIANGLE))
+		open_browser(vid_url);
+	if (pad_pressed || touch_tap)
+		vid_osd_until = now_ms() + 3000;
+}
+
+static void fmt_time(uint64_t ms, char *out, int n)
+{
+	unsigned s = (unsigned)(ms / 1000);
+	snprintf(out, n, "%u:%02u", s / 60, s % 60);
+}
+
+static void draw_video_screen(void)
+{
+	vita2d_draw_rectangle(0, 0, SCR_W, SCR_H, RGBA8(0, 0, 0, 0xff));
+	int st = video_state();
+	vita2d_texture *f = video_frame();
+	if (f) {
+		float w = vita2d_texture_get_width(f), h = vita2d_texture_get_height(f);
+		float sc = SCR_W / w < SCR_H / h ? SCR_W / w : SCR_H / h;
+		vita2d_draw_texture_scale(f, (SCR_W - w * sc) / 2, (SCR_H - h * sc) / 2, sc, sc);
+	}
+	char b[200];
+	int cy = SCR_H / 2 - lh;
+	if (st == VS_DOWNLOADING) {
+		snprintf(b, sizeof(b), T("Descargando video... %d%%"), video_progress());
+		draw_text((SCR_W - text_w(b)) / 2, cy, C_TEXT, b);
+		vita2d_draw_rectangle(SCR_W / 4, cy + lh + 10, SCR_W / 2, 6, C_LINE);
+		vita2d_draw_rectangle(SCR_W / 4, cy + lh + 10, SCR_W / 2 * video_progress() / 100, 6, C_ACCENT);
+	} else if (st == VS_ERROR) {
+		draw_text_fit(30, cy, SCR_W - 60, C_ERR, video_error());
+	} else if (st == VS_ENDED) {
+		const char *t = T("Fin del video");
+		draw_text((SCR_W - text_w(t)) / 2, cy, C_TEXT, t);
+	}
+	int osd = now_ms() < vid_osd_until || st != VS_PLAYING;
+	if (osd) {
+		vita2d_draw_rectangle(0, 0, SCR_W, TOP_H, RGBA8(0, 0, 0, 0xb0));
+		draw_text_fit(12, (TOP_H - lh) / 2, SCR_W - 24, C_DIM, vid_url);
+		int y = SCR_H - BOT_H - 18;
+		uint64_t t = video_time_ms(), d = video_duration_ms();
+		if (d && (st == VS_PLAYING || st == VS_PAUSED)) {
+			char a[16], z[16];
+			fmt_time(t, a, sizeof(a));
+			fmt_time(d, z, sizeof(z));
+			snprintf(b, sizeof(b), "%s / %s", a, z);
+			vita2d_draw_rectangle(14, y, SCR_W - 28, 4, C_LINE);
+			vita2d_draw_rectangle(14, y, (int)((SCR_W - 28) * (t < d ? t : d) / d), 4, C_ACCENT);
+			draw_text(SCR_W - 14 - text_w(b), y - lh - 4, C_TEXT, b);
+		}
+		const int g[] = { glyph_ok, G_L, G_R, G_TRIANGLE, glyph_back };
+		const char *l[] = { st == VS_ENDED ? T("Repetir") : st == VS_PAUSED ? T("Reproducir") : T("Pausa"),
+		                    "", T("±10 s"), T("Abrir en el navegador"), T("Cerrar") };
+		draw_bottombar_hints(5, g, l);
+	}
+	if (st == VS_DOWNLOADING || st == VS_PLAYING)
+		g_dirty = 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Help                                                               */
 /* ------------------------------------------------------------------ */
 static void draw_help_screen(void)
@@ -3885,7 +4097,13 @@ static void demo_tick(void)
 		}
 		users_snapshot(); screen = SCR_USERS; list_sel = 3; open_user_menu(ul_users[3].nick); strcpy(demo_shot, "10_user_ops"); break;
 	case 11: screen = SCR_SERVERS; list_sel = 0; open_presets(); strcpy(demo_shot, "11_presets"); break;
-	case 12: screen = SCR_CHAT; do_action(A_CAMERA); strcpy(demo_shot, "12_camera"); break;
+	case 12:
+		screen = SCR_CHAT;
+#ifndef VITAIRC_DEMO_NOCAM
+		do_action(A_CAMERA);
+#endif
+		strcpy(demo_shot, "12_camera");
+		break;
 	case 13: cam_close(); screen = SCR_SETTINGS; list_sel = S_HIGHLIGHT; strcpy(demo_shot, "13_settings"); break;
 	case 14: screen = SCR_HELP; strcpy(demo_shot, "14_help"); break;
 #ifdef VITAIRC_DEMO_EN
@@ -3937,14 +4155,43 @@ static void demo_tick(void)
 			return;
 		strcpy(demo_shot, "22_favorites");
 		break;
-	case 25:
+	case 25: {
 		if (g_bres_n > 5 && booru_is_fav(g_bres[5].engine, g_bres[5].id))
 			booru_fav_toggle(&g_bres[5], NULL);      /* leave the emulator's favorites as they were */
+		Chan *l = irc_get_chan(s, "#previews", CH_CHANNEL);
+		l->joined = 1;
+		irc_add_msg(s, l, MT_MSG, "pixel", "look at this https://picsum.photos/id/1018/800/500.jpg", 0);
+		irc_add_msg(s, l, MT_MSG, "kuro", "the source is here https://github.com/ArchelKrozt/VitaIRC", 0);
+		irc_add_msg(s, l, MT_MSG, "lumi", "classic https://www.youtube.com/watch?v=dQw4w9WgXcQ", 0);
+		irc_add_msg(s, l, MT_MSG, "tako", "tiny clip: https://www.w3schools.com/html/mov_bbb.mp4", 0);
+		set_view(0, l->uid);
+		screen = SCR_CHAT;
+		step_at = now_ms();
+		break;
+	}
+	case 26:
+		if (now_ms() - step_at < 15000)
+			return;
+		strcpy(demo_shot, "23_previews");
+		break;
+	case 27: open_video("https://www.w3schools.com/html/mov_bbb.mp4"); step_at = now_ms(); break;
+	case 28:
+		if (now_ms() - step_at < 9000)
+			return;
+		strcpy(demo_shot, "24_video");
+		break;
+	case 29: {
+		video_close();
+		Chan *l = irc_find_chan(s, "#previews");
+		if (l)
+			irc_close_chan(s, l);
+		ensure_valid_view();
 		screen = SCR_CHAT;
 		ask_confirm(T("¿Salir de VitaIRC? Se cerrarán las conexiones."), A_EXIT, 0);
 		strcpy(demo_shot, "17_confirm");
 		break;
-	case 26: app_running = 0; break;
+	}
+	case 30: app_running = 0; break;
 	}
 	demo_step++;
 	g_dirty = 1;
@@ -4048,8 +4295,10 @@ int main(void)
 	session_restore();
 	pthread_mutex_unlock(&g_lock);
 #endif
+	httpc_init();
 	net_init();
 	booru_init();
+	pv_init();
 	sound_init();
 	check_wifi();
 #ifndef VITAIRC_DEMO
@@ -4112,6 +4361,7 @@ int main(void)
 			case SCR_IMAGE:    image_input(); break;
 			case SCR_CAMERA:   camera_input(); break;
 			case SCR_BOORU:    booru_input(); break;
+			case SCR_VIDEO:    video_input(); break;
 			}
 		}
 		if (g_invite_pending && !confirm_open && !menu_open && !ime.active) {
@@ -4189,6 +4439,15 @@ int main(void)
 		last_minute = minute;
 		g_dirty = 0;
 
+		pthread_mutex_lock(&g_lock);
+		if (pv_frame())
+			lay_gen++;
+		pthread_mutex_unlock(&g_lock);
+		if (screen == SCR_VIDEO) {
+			video_update();
+			if (video_state() == VS_PLAYING)
+				sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
+		}
 		vita2d_start_drawing();
 		vita2d_clear_screen();
 		pthread_mutex_lock(&g_lock);
@@ -4204,6 +4463,7 @@ int main(void)
 		case SCR_IMAGE:    draw_image_screen(); break;
 		case SCR_CAMERA:   draw_camera_screen(); break;
 		case SCR_BOORU:    draw_booru_screen(); break;
+		case SCR_VIDEO:    draw_video_screen(); break;
 		}
 		if (menu_open)
 			draw_menu();
@@ -4220,6 +4480,7 @@ int main(void)
 	}
 
 	/* goodbye */
+	video_close();
 	irc_quit_all();
 	uint64_t until = now_ms() + 1200;
 	while (now_ms() < until) {

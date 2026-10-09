@@ -15,6 +15,7 @@
 #include "i18n.h"
 #include "minijson.h"
 #include "imgutil.h"
+#include "httpc.h"
 
 #define FAV_PATH    DATA_DIR "/favorites.txt"
 #define FAV_THUMBS  DATA_DIR "/favthumbs"
@@ -37,7 +38,6 @@ static int  s_gen;
 static int  s_page;
 static char s_cursor[128];
 
-static int  have_ca;
 static char sk_token[700];
 static char sk_token_user[64];       /* account the token belongs to */
 static uint64_t sk_token_until;
@@ -100,69 +100,15 @@ static char rating_code(const char *r)
 
 /* ---------------- HTTP ---------------- */
 
-typedef struct { char *data; size_t len, max; } HBuf;
-
-static size_t hb_write(void *ptr, size_t size, size_t n, void *ud)
-{
-	HBuf *b = ud;
-	size_t k = size * n;
-	if (b->len + k > b->max)
-		return 0;
-	char *nd = realloc(b->data, b->len + k + 1);
-	if (!nd)
-		return 0;
-	b->data = nd;
-	memcpy(b->data + b->len, ptr, k);
-	b->len += k;
-	b->data[b->len] = 0;
-	return k;
-}
-
-/* GET (or POST when body is set). Returns 0 on success (2xx). */
 static int http(const char *url, struct curl_slist *hdr, const char *body, HBuf *out, size_t max,
                 char *err, int errlen, long *code_out)
 {
-	memset(out, 0, sizeof(*out));
-	out->max = max;
-	CURL *c = curl_easy_init();
-	if (!c) {
-		snprintf(err, errlen, T("Error interno (JSON)"));
-		return -1;
-	}
-	curl_easy_setopt(c, CURLOPT_URL, url);
-	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, hb_write);
-	curl_easy_setopt(c, CURLOPT_WRITEDATA, out);
-	curl_easy_setopt(c, CURLOPT_TIMEOUT, 90L);
-	curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-	curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
-	curl_easy_setopt(c, CURLOPT_USERAGENT, "VitaIRC/" APP_VERSION " (PlayStation Vita)");
-	if (hdr)
-		curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
-	if (body)
-		curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
-	if (have_ca) {
-		curl_easy_setopt(c, CURLOPT_CAINFO, CA_PATH);
-	} else {
-		curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
-		curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
-	}
-	CURLcode rc = curl_easy_perform(c);
-	long code = 0;
-	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-	curl_easy_cleanup(c);
+	HReq rq = { hdr, body, NULL, max, 90, 0 };
+	HRes rs;
+	int rc = httpc(url, &rq, out, &rs, err, errlen);
 	if (code_out)
-		*code_out = code;
-	if (rc != CURLE_OK) {
-		snprintf(err, errlen, T("Red: %s"), curl_easy_strerror(rc));
-		return -1;
-	}
-	if (code >= 300) {
-		snprintf(err, errlen, "HTTP %ld", code);
-		return -1;
-	}
-	return 0;
+		*code_out = rs.code;
+	return rc == 0 ? 0 : -1;
 }
 
 static struct curl_slist *sankaku_headers(int image)
@@ -972,11 +918,6 @@ static void clear_cache(void)
 
 void booru_init(void)
 {
-	FILE *f = fopen(CA_PATH, "r");
-	if (f) {
-		have_ca = 1;
-		fclose(f);
-	}
 	g_bres = calloc(BOORU_MAX_RESULTS, sizeof(BPost));
 	g_bfav = calloc(BOORU_MAX_FAVS, sizeof(BPost));
 	g_bres_engine = g_cfg.booru_engine;

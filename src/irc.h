@@ -67,6 +67,8 @@ typedef struct {
 	int      lay_lines;
 	uint16_t *lay_breaks;   /* byte offsets of wrapped line starts (text then translation) */
 	int      lay_text_lines;
+	uint16_t lay_gen;           /* layout generation (link previews change sizes) */
+	uint8_t  lay_pv;            /* lines taken by the link preview */
 } Msg;
 
 typedef struct {

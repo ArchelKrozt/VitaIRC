@@ -15,6 +15,12 @@ int  img_is_gif(const unsigned char *buf, size_t len);
 /* WebP -> malloc'd RGBA (stride w*4), scaled down to fit maxdim. */
 unsigned char *webp_decode_rgba(const unsigned char *buf, size_t len, int maxdim, int *w, int *h);
 
+/* PNG, JPEG or WebP -> malloc'd RGBA (stride w*4) that fits maxw x maxh,
+ * decoded at reduced size so big photos don't need full-size memory. */
+unsigned char *img_decode_thumb(const unsigned char *buf, size_t len, int maxw, int maxh, int *w, int *h);
+/* RGBA pixels -> new texture */
+vita2d_texture *tex_from_rgba(const unsigned char *px, int w, int h);
+
 /* Writes RGBA pixels (R,G,B,A in memory) as a JPEG file. Returns 0 on success. */
 int  rgba_save_jpeg(const unsigned char *px, int w, int h, int stride, const char *path, int quality);
 /* Saves a texture as JPEG, scaled down (nearest) to fit maxdim. */

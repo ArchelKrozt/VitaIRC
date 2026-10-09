@@ -39,6 +39,7 @@ something back to the Vita scene, and it is fully open source.
 - [Translation](#translation)
 - [Images: uploads, camera and viewer](#images-uploads-camera-and-viewer)
 - [Image search and favorites](#image-search-and-favorites)
+- [Link previews and videos](#link-previews-and-videos)
 - [Logging in to Libera.Chat (SASL)](#logging-in-to-liberachat-sasl)
 - [Never miss a message: bouncers](#never-miss-a-message-bouncers)
 - [Configuration file](#configuration-file)
@@ -98,8 +99,10 @@ something back to the Vita scene, and it is fully open source.
 - **My recent uploads**: resend a link, or delete an ImgBB image.
 - **Image search** on Safebooru, Danbooru and Sankaku with a thumbnail grid, **favorites** kept on
   the memory card, **save to the Vita** and **send to the chat** in one button.
-- **Built-in image viewer** (PNG/JPG, zoom and pan) for image and Imgur links; other links open in
-  the Vita browser.
+- **Built-in image viewer** (PNG/JPG/WebP, zoom and pan) for image and Imgur links; other links open
+  in the Vita browser.
+- **Link previews** in the chat: image thumbnails, cards with title, description and picture for web
+  pages and YouTube, and a **built-in MP4 player** for video links.
 
 ## Screenshots
 
@@ -235,6 +238,25 @@ post in the browser.
   (asks you to confirm you are 18+). Tags that sexualise minors are always filtered out.
 - Danbooru allows two tags per search without an account.
 
+## Link previews and videos
+
+When a message contains a link, VitaIRC shows a preview under it (only for messages on screen):
+
+| Link | Preview | Tap it |
+|---|---|---|
+| Image (`.jpg`, `.png`, `.webp`, `imgur.com/…`) | Thumbnail | Opens the image viewer |
+| Web page | Card with title, description and picture (`og:` tags) | Opens the browser |
+| YouTube | Card with title, channel and thumbnail ▶ | Opens the browser |
+| MP4 video (`.mp4`, `.mov`, Imgur `.gifv`) | ▶ card with the size | **Plays it in the app** |
+| GIF, WebM | Card | Opens the browser |
+
+The **player** downloads the video to the memory card (up to 150 MB) and plays it with the Vita's
+hardware decoder: ✕ pause / resume, L/R ±10 s, △ open in the browser, ○ close. The Vita plays
+**MP4 with H.264 video and AAC audio**; other formats open in the browser.
+
+Previews fetch each link from your Vita, so the sites see your IP address. Turn them off in
+**Settings → Link previews**.
+
 ## Logging in to Libera.Chat (SASL)
 
 **△ → Servers... →** Libera.Chat **→ ✕** and fill in:
@@ -341,7 +363,7 @@ your servers, channels, settings and history in `ux0:data/VitaIRC/` are kept.
   (the screen may still dim), and it reconnects by itself after resuming. Use a bouncer to keep
   everything you miss.
 - Emoji are drawn in one colour (the text's), and combined emoji (flags, families) show as their parts.
-- GIF and WebP images open in the browser instead of the built-in viewer.
+- GIF images open in the browser instead of the built-in viewer; videos must be MP4 (H.264 + AAC).
 - Reactions need a server with IRCv3 `message-tags` (soju, Ergo...); Libera.Chat does not offer it.
 
 ## Building from source
@@ -374,6 +396,9 @@ VPK attached.
 | `src/main.c` | UI (vita2d), input, on-screen keyboard, screens and menus |
 | `src/irc.c` | IRC protocol, one thread per server, channels, users, commands |
 | `src/conn.c` | Sockets + TLS (mbedTLS) |
+| `src/preview.c` | Link previews (thumbnails, page cards, YouTube oEmbed) |
+| `src/video.c` | MP4 player (SceAvPlayer) |
+| `src/httpc.c` | Shared HTTP client for the worker threads |
 | `src/booru.c` | Image search (Safebooru, Danbooru, Sankaku), content filter, favorites |
 | `src/imgutil.c` | WebP decoding, JPEG saving for the viewer and the search |
 | `src/net.c` | HTTP worker: translation (Google / OpenAI), image uploads (Litterbox, ImgBB, Imgur, soju FILEHOST), downloads, update check (libcurl) |

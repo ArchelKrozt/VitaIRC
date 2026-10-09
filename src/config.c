@@ -56,6 +56,7 @@ void config_defaults(void)
 	g_cfg.img_host = -1;
 	g_cfg.litter_time = 3;
 	g_cfg.update_check = 1;
+	g_cfg.link_previews = 1;
 	strcpy(g_cfg.update_repo, UPDATE_REPO);
 	strcpy(g_cfg.openai_model, "gpt-4o-mini");
 	strcpy(g_cfg.lang_in, "es");
@@ -84,6 +85,7 @@ static void apply_general(const char *k, const char *v)
 	else if (!strcmp(k, "litterbox_time")) g_cfg.litter_time = atoi(v);
 	else if (!strcmp(k, "update_check")) g_cfg.update_check = atoi(v);
 	else if (!strcmp(k, "search_adult")) g_cfg.booru_adult = atoi(v);
+	else if (!strcmp(k, "link_previews")) g_cfg.link_previews = atoi(v);
 	else if (!strcmp(k, "search_engine")) g_cfg.booru_engine = atoi(v);
 	else if (!strcmp(k, "sankaku_user")) SETS(g_cfg.sankaku_user, v);
 	else if (!strcmp(k, "sankaku_password")) SETS(g_cfg.sankaku_pass, v);
@@ -200,6 +202,7 @@ int config_save(void)
 	fprintf(f, "litterbox_time=%d\n", g_cfg.litter_time);
 	fprintf(f, "update_check=%d\n", g_cfg.update_check);
 	fprintf(f, "search_adult=%d\n", g_cfg.booru_adult);
+	fprintf(f, "link_previews=%d\n", g_cfg.link_previews);
 	fprintf(f, "search_engine=%d\n", g_cfg.booru_engine);
 	fprintf(f, "sankaku_user=%s\n", g_cfg.sankaku_user);
 	fprintf(f, "sankaku_password=%s\n", g_cfg.sankaku_pass);
