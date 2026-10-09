@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "VitaIRC")
 set(VITA_TITLEID  "VIRC00001")
-set(VITA_VERSION  "01.30")
+set(VITA_VERSION  "01.40")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -Wall -Wno-format-truncation -Wno-stringop-truncation")
 

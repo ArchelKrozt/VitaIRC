@@ -432,6 +432,12 @@ static const char *const tbl[][2] = {
 	{ "toca para abrir en el navegador", "tap to open in the browser" },
 	{ "toca para ver la imagen", "tap to view the image" },
 	{ "±10 s", "±10 s" },
+	{ "Buscar canal (nombre o tema)", "Search channel (name or topic)" },
+	{ "%s  ·  \"%s\": %d canales%s", "%s  ·  \"%s\": %d channels%s" },
+	{ "Buscando en el servidor...", "Searching the server..." },
+	{ "No hay canales con \"%s\". Pulsa ✕ para entrar a %s (si no existe, se crea).", "No channels with \"%s\". Press ✕ to join %s (it is created if it doesn't exist)." },
+	{ "El servidor no devolvió canales.", "The server returned no channels." },
+	{ "Este servidor no busca en toda su lista: se filtran solo los canales más grandes.", "This server can't search its whole list: only the biggest channels are filtered." },
 };
 
 const char *T(const char *es)

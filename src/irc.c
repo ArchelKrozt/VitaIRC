@@ -813,7 +813,10 @@ void irc_user_input(int sidx, uint32_t chan_uid, const char *input)
 		s->listed = NULL;
 		s->nlisted = 0;
 		s->listing = 1;
-		irc_send_raw(s, "LIST");
+		if (args[0])
+			irc_send_raw(s, "LIST %s", args);   /* e.g. /list *vita* */
+		else
+			irc_send_raw(s, "LIST");
 	} else if (!strcmp(cmd, "QUOTE") || !strcmp(cmd, "RAW")) {
 		if (args[0])
 			irc_send_raw(s, "%s", args);
@@ -1801,6 +1804,8 @@ static void handle_line(Server *s, char *raw)
 				char *close = strchr(l.p[i], ')');
 				if (close)
 					str_copy(s->prefixes, close + 1, sizeof(s->prefixes));
+			} else if (!strncmp(l.p[i], "ELIST=", 6)) {
+				s->list_mask = strchr(l.p[i] + 6, 'M') || strchr(l.p[i] + 6, 'm');
 			} else if (!strncmp(l.p[i], "CHATHISTORY=", 12)) {
 				s->history_max = atoi(l.p[i] + 12);
 			} else if (!strncmp(l.p[i], "soju.im/FILEHOST=", 17)) {
@@ -2025,6 +2030,7 @@ static void *server_thread(void *arg)
 		s->sasl_ok = 0;
 		s->cap_tags = s->cap_batch = s->cap_history = 0;
 		s->history_max = 0;
+		s->list_mask = 0;
 		s->filehost[0] = 0;
 		batches_reset(s);
 		for (int i = 0; i < s->nchans; i++) {

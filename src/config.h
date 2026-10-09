@@ -1,7 +1,7 @@
 #ifndef VITAIRC_CONFIG_H
 #define VITAIRC_CONFIG_H
 
-#define APP_VERSION   "1.3"
+#define APP_VERSION   "1.4"
 #define DATA_DIR      "ux0:data/VitaIRC"
 #define CONFIG_PATH   DATA_DIR "/config.ini"
 #define CA_PATH       "app0:cacert.pem"

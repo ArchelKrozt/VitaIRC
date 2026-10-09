@@ -155,6 +155,7 @@ typedef struct Server {
 	int        cap_batch;
 	int        cap_history;     /* draft/chathistory (with batch) */
 	int        history_max;     /* ISUPPORT CHATHISTORY */
+	int        list_mask;       /* ISUPPORT ELIST has M: LIST accepts *mask* */
 	char       filehost[256];   /* ISUPPORT soju.im/FILEHOST upload URL */
 	Batch      batches[MAX_BATCHES];
 	OfflineMsg offq[MAX_OFFLINE];

@@ -46,7 +46,8 @@ a la escena de la Vita y es de código abierto.
 - **Colores, negritas y subrayado de IRC**, **palabras de alerta**, avisos y **sonido** en privados y menciones.
 - **Ignorar usuarios** (con comodines) y **protección contra flood** de privados.
 - **Herramientas de operador** desde la lista de usuarios: op, voz, kick y ban.
-- `/away`, invitaciones con confirmación, explorador de canales (`/list`).
+- `/away`, invitaciones con confirmación, explorador de canales (`/list`) con **buscador de canales**
+  (△): le pregunta al servidor, así aparecen también los canales pequeños.
 - **Buscar en el canal** y **saltar a la última mención**.
 - **Redes predefinidas**: Libera.Chat, OFTC, EFnet, Rizon, DALnet, hackint, IRCnet, Undernet, QuakeNet.
 - **Historial guardado** en la tarjeta de memoria: al reabrir vuelven tus canales y sus mensajes.

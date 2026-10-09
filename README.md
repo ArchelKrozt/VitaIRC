@@ -68,7 +68,8 @@ something back to the Vita scene, and it is fully open source.
 - **Mute** a channel (no sound or pop-ups) from its menu.
 - **Ignore list** with wildcards and private-message **flood protection**.
 - **Operator tools** from the user list: op/deop, voice/devoice, kick, ban.
-- `/away`, invitations with a *"Join?"* prompt, channel browser (`/list`).
+- `/away`, invitations with a *"Join?"* prompt, channel browser (`/list`) with **channel search** (△):
+  the server is asked for matching channels, so small ones show up too.
 - **Search** inside a channel and **jump to your last mention**.
 - **Network presets**: Libera.Chat, OFTC, EFnet, Rizon, DALnet, hackint, IRCnet, Undernet, QuakeNet.
 

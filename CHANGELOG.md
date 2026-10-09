@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4
+
+- **Channel search** in the channel browser (△): asks the server for matching channels
+  (`LIST *text*` where supported, e.g. Libera.Chat) so small channels show up too, filters by name or
+  topic, puts the exact name first, and offers to join `#text` when nothing matches.
+
 ## 1.3
 
 - **Link previews** under messages: image thumbnails, page cards (title, description and picture

@@ -474,7 +474,7 @@ static void touch_read(void)
 /* ------------------------------------------------------------------ */
 /* IME (on-screen keyboard)                                           */
 /* ------------------------------------------------------------------ */
-enum { IME_NONE, IME_CHAT, IME_JOIN, IME_PM, IME_NICK, IME_TOPIC, IME_FIELD, IME_FIELD_INT, IME_AWAY, IME_SEARCH, IME_KICK, IME_BOORU };
+enum { IME_NONE, IME_CHAT, IME_JOIN, IME_PM, IME_NICK, IME_TOPIC, IME_FIELD, IME_FIELD_INT, IME_AWAY, IME_SEARCH, IME_KICK, IME_BOORU, IME_CHANSEARCH };
 
 static struct {
 	int      active;
@@ -3226,6 +3226,60 @@ static int listed_cmp(const void *a, const void *b)
 	return ((const ListedChan *)b)->users - ((const ListedChan *)a)->users;
 }
 
+/* channel search: what is typed, and the rows that match it */
+static char cl_filter[64];
+static int  cl_rows[MAX_LISTED];
+static int  cl_nrows;
+
+/* Rows of the list matching the search (name or topic); an exact name goes first. */
+static void chanlist_filter(Server *s)
+{
+	cl_nrows = 0;
+	char exact[66];
+	snprintf(exact, sizeof(exact), "%s%s", cl_filter[0] == '#' ? "" : "#", cl_filter);
+	for (int i = 0; i < s->nlisted; i++) {
+		ListedChan *e = &s->listed[i];
+		if (cl_filter[0] && !str_icontains(e->name, cl_filter) && !str_icontains(e->topic, cl_filter))
+			continue;
+		if (cl_filter[0] && !str_icmp(e->name, exact)) {
+			memmove(&cl_rows[1], &cl_rows[0], cl_nrows * sizeof(int));
+			cl_rows[0] = i;
+		} else {
+			cl_rows[cl_nrows] = i;
+		}
+		cl_nrows++;
+	}
+}
+
+/* #name to join when the search finds nothing */
+static void chanlist_guess(char *out, int n)
+{
+	snprintf(out, n, "%s%s", cl_filter[0] == '#' ? "" : "#", cl_filter);
+	out[strcspn(out, " ,*?")] = 0;
+}
+
+static void chanlist_search(const char *text)
+{
+	Server *s = cur_server();
+	Chan *c = cur_chan();
+	str_copy(cl_filter, text, sizeof(cl_filter));
+	str_trim(cl_filter);
+	list_sel = list_top = 0;
+	if (!s)
+		return;
+	/* the list keeps only the biggest channels: ask the server for the matches */
+	char cmd[96];
+	if (cl_filter[0] && s->list_mask) {
+		char mask[70];
+		str_copy(mask, cl_filter[0] == '#' ? cl_filter + 1 : cl_filter, sizeof(mask));
+		mask[strcspn(mask, " ,")] = 0;
+		snprintf(cmd, sizeof(cmd), "/list *%s*", mask);
+	} else {
+		snprintf(cmd, sizeof(cmd), "/list");
+	}
+	irc_user_input(s->idx, c ? c->uid : 0, cmd);
+}
+
 static void chanlist_input(void)
 {
 	Server *s = cur_server();
@@ -3233,12 +3287,20 @@ static void chanlist_input(void)
 		screen = SCR_CHAT;
 		return;
 	}
+	if (PRESSED(SCE_CTRL_TRIANGLE)) {
+		ime.sidx = s->idx;
+		ime_open(IME_CHANSEARCH, T("Buscar canal (nombre o tema)"), cl_filter, 60, 0, 0);
+		return;
+	}
 	pthread_mutex_lock(&g_lock);
-	int n = s->nlisted;
+	chanlist_filter(s);
+	int n = cl_nrows;
 	int act = list_nav(n);
 	char name[64] = "";
 	if (n && list_sel < n)
-		str_copy(name, s->listed[list_sel].name, sizeof(name));
+		str_copy(name, s->listed[cl_rows[list_sel]].name, sizeof(name));
+	else if (!n && cl_filter[0] && s->listing == 2)
+		chanlist_guess(name, sizeof(name));
 	pthread_mutex_unlock(&g_lock);
 	Chan *c = cur_chan();
 	if ((PRESSED(btn_ok) || act) && name[0]) {
@@ -3247,8 +3309,7 @@ static void chanlist_input(void)
 		irc_user_input(s->idx, c ? c->uid : 0, cmd);
 		screen = SCR_CHAT;
 	} else if (PRESSED(SCE_CTRL_SQUARE)) {
-		irc_user_input(s->idx, c ? c->uid : 0, "/list");
-		list_sel = list_top = 0;
+		chanlist_search(cl_filter);
 	}
 }
 
@@ -3265,14 +3326,20 @@ static void draw_chanlist_screen(void)
 	}
 	if (s->listing != 2)
 		sorted_count = -1;
-	snprintf(sub, sizeof(sub), T("%s  ·  %d canales%s"), g_cfg.servers[s->idx].name, s->nlisted,
-	         s->listing == 1 ? T("  ·  cargando...") : "");
+	chanlist_filter(s);
+	if (cl_filter[0])
+		snprintf(sub, sizeof(sub), T("%s  ·  \"%s\": %d canales%s"), g_cfg.servers[s->idx].name, cl_filter, cl_nrows,
+		         s->listing == 1 ? T("  ·  cargando...") : "");
+	else
+		snprintf(sub, sizeof(sub), T("%s  ·  %d canales%s"), g_cfg.servers[s->idx].name, s->nlisted,
+		         s->listing == 1 ? T("  ·  cargando...") : "");
 	draw_topbar(T("Canales"), sub);
 	int rh = lh + 10;
-	list_clamp(s->nlisted, rh);
+	list_clamp(cl_nrows, rh);
 	int vis = list_rows_visible(rh);
-	for (int i = list_top; i < s->nlisted && i < list_top + vis; i++) {
-		ListedChan *e = &s->listed[i];
+	for (int r = list_top; r < cl_nrows && r < list_top + vis; r++) {
+		int i = r;
+		ListedChan *e = &s->listed[cl_rows[r]];
 		int y = TOP_H + 8 + (i - list_top) * rh;
 		draw_list_row(i, y, rh, i == list_sel);
 		draw_text_fit(30, y + 4, 230, C_CHAN, e->name);
@@ -3281,11 +3348,27 @@ static void draw_chanlist_screen(void)
 		draw_text(270, y + 4, C_ACCENT, u);
 		draw_text_fit(340, y + 4, SCR_W - 370, C_DIM, e->topic);
 	}
-	if (!s->nlisted)
-		draw_text(30, TOP_H + 20, C_DIM, s->state == SS_ONLINE ? T("Esperando la lista del servidor...") : T("Conéctate primero al servidor."));
-	const int g[] = { glyph_ok, G_SQUARE, glyph_back };
-	const char *l[] = { T("Unirse"), T("Actualizar"), T("Volver") };
-	draw_bottombar_hints(3, g, l);
+	if (!cl_nrows) {
+		char msg[200], guess[70];
+		if (s->state != SS_ONLINE) {
+			snprintf(msg, sizeof(msg), "%s", T("Conéctate primero al servidor."));
+		} else if (s->listing != 2) {
+			snprintf(msg, sizeof(msg), "%s", cl_filter[0] ? T("Buscando en el servidor...") : T("Esperando la lista del servidor..."));
+		} else if (cl_filter[0]) {
+			chanlist_guess(guess, sizeof(guess));
+			snprintf(msg, sizeof(msg), T("No hay canales con \"%s\". Pulsa ✕ para entrar a %s (si no existe, se crea)."),
+			         cl_filter, guess);
+		} else {
+			snprintf(msg, sizeof(msg), "%s", T("El servidor no devolvió canales."));
+		}
+		draw_text_fit(30, TOP_H + 20, SCR_W - 60, C_DIM, msg);
+	}
+	if (cl_filter[0] && !s->list_mask && s->listing == 2)
+		draw_text_fit(30, SCR_H - BOT_H - lh - 6, SCR_W - 60, C_FAINT,
+		              T("Este servidor no busca en toda su lista: se filtran solo los canales más grandes."));
+	const int g[] = { glyph_ok, G_TRIANGLE, G_SQUARE, glyph_back };
+	const char *l[] = { T("Unirse"), T("Buscar"), T("Actualizar"), T("Volver") };
+	draw_bottombar_hints(4, g, l);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3912,6 +3995,9 @@ static void ime_apply(char *text)
 		snprintf(cmd, sizeof(cmd), "/kick %s %s", u_nick, text);
 		irc_user_input(ime.sidx, ime.uid, cmd);
 		screen = SCR_CHAT;
+		break;
+	case IME_CHANSEARCH:
+		chanlist_search(text);
 		break;
 	case IME_BOORU:
 		str_trim(text);
