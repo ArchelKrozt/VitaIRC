@@ -21,6 +21,9 @@ VitaIRC es un cliente IRC homebrew escrito en C para consolas con HENkaku/Ensō.
 servidores IRC directamente desde la Vita, sin PC ni servidores intermedios. Está hecho para apoyar
 a la escena de la Vita y es de código abierto.
 
+> 📱 **También en Android:** [VitaIRC for Android](https://github.com/ArchelKrozt/VitaIRC-Android) tiene
+> las mismas funciones, rediseñadas para pantalla táctil, y lee el mismo `config.ini`.
+
 ![Interfaz en español](screenshots/15_chat_es.png)
 
 ## Funciones
