@@ -165,6 +165,7 @@ typedef struct Server {
 	ListedChan *listed;
 	int        nlisted;
 	int        listing;         /* 1 = loading, 2 = done */
+	int        list_skip;       /* older LIST answers still arriving (dropped) */
 	pthread_t  thread;
 	int        thread_started;
 	Conn       conn;

@@ -809,6 +809,9 @@ void irc_user_input(int sidx, uint32_t chan_uid, const char *input)
 		if (args[0])
 			irc_send_raw(s, "WHOIS %s", args);
 	} else if (!strcmp(cmd, "LIST")) {
+		/* a list still arriving: its rest is not part of the new one */
+		if (s->listing == 1 && s->list_skip < 8)
+			s->list_skip++;
 		free(s->listed);
 		s->listed = NULL;
 		s->nlisted = 0;
@@ -1869,7 +1872,7 @@ static void handle_line(Server *s, char *raw)
 	case 321:
 		return;
 	case 322:
-		if (l.np >= 3) {
+		if (l.np >= 3 && !s->list_skip) {
 			if (!s->listed)
 				s->listed = calloc(MAX_LISTED, sizeof(ListedChan));
 			if (!s->listed)
@@ -1896,6 +1899,10 @@ static void handle_line(Server *s, char *raw)
 		}
 		return;
 	case 323:
+		if (s->list_skip > 0) {     /* end of an older list */
+			s->list_skip--;
+			return;
+		}
 		s->listing = 2;
 		g_dirty = 1;
 		return;
@@ -2031,6 +2038,8 @@ static void *server_thread(void *arg)
 		s->cap_tags = s->cap_batch = s->cap_history = 0;
 		s->history_max = 0;
 		s->list_mask = 0;
+		s->listing = 0;
+		s->list_skip = 0;
 		s->filehost[0] = 0;
 		batches_reset(s);
 		for (int i = 0; i < s->nchans; i++) {
