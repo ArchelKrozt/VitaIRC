@@ -30,6 +30,7 @@ something back to the Vita scene, and it is fully open source.
 
 > 📱 **Also on Android:** [VitaIRC for Android](https://github.com/ArchelKrozt/VitaIRC-Android) has the
 > same features, redesigned for touch screens, and reads the same `config.ini`.
+> 🍎 **And on iPhone/iPad:** [VitaIRC for iPhone](https://github.com/ArchelKrozt/VitaIRC-iOS).
 
 ## Contents
 

@@ -23,6 +23,7 @@ a la escena de la Vita y es de código abierto.
 
 > 📱 **También en Android:** [VitaIRC for Android](https://github.com/ArchelKrozt/VitaIRC-Android) tiene
 > las mismas funciones, rediseñadas para pantalla táctil, y lee el mismo `config.ini`.
+> 🍎 **Y en iPhone/iPad:** [VitaIRC for iPhone](https://github.com/ArchelKrozt/VitaIRC-iOS).
 
 ![Interfaz en español](screenshots/15_chat_es.png)
 
